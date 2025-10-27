@@ -607,7 +607,10 @@ const buildInputMessages = ({
   attachmentsInfo = [],
   adaptivePromptDisplay = '',
   adaptiveAnswerText = '',
-  adaptiveSummary = null
+  adaptiveSummary = null,
+  adaptiveDeveloperPrompt = '',
+  adaptivePromptAddendum = '',
+  log
 }) => {
   const { block, truncated, originalLength } = buildDocumentBlock(document);
   const pageImages = Array.isArray(document?.meta?.pageImages) ? document.meta.pageImages : [];
@@ -644,7 +647,37 @@ const buildInputMessages = ({
     .filter(Boolean)
     .join('\n\n');
 
-  const developerText = developerPromptText || LEGAL_ANALYSIS_PROMPT;
+  // Никаких truncate/clamp! Только мягкая очистка управляющих символов.
+  const sanitizeSoft = (s) =>
+    typeof s === 'string'
+      ? s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+      : '';
+
+  const developerText = [
+    adaptiveDeveloperPrompt && `# Adaptive developer prompt\n${sanitizeSoft(adaptiveDeveloperPrompt)}`,
+    developerPromptText ? sanitizeSoft(developerPromptText) : LEGAL_ANALYSIS_PROMPT,
+    adaptivePromptAddendum && `# Adaptive addendum\n${sanitizeSoft(adaptivePromptAddendum)}`
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  if (typeof log === 'function') {
+    log({
+      level: 'info',
+      scope: 'openai',
+      message: 'Developer message prepared',
+      developerLen: developerText.length
+    });
+  }
+
+  if (typeof log === 'function' && developerText.length > 80000) {
+    log({
+      level: 'warn',
+      scope: 'openai',
+      message: 'Developer prompt is very large; consider splitting policy into short includes.',
+      developerLen: developerText.length
+    });
+  }
   const universalText = sanitizeText(universalPromptText || '');
 
   const universalBlock = universalText
@@ -1794,9 +1827,12 @@ export async function analyzeDocuments({
     fileParts,
     ragContext: '',
     attachmentsInfo,
+    adaptiveDeveloperPrompt,
+    adaptivePromptAddendum,
     adaptivePromptDisplay: adaptivePromptAddendum,
     adaptiveAnswerText,
-    adaptiveSummary
+    adaptiveSummary,
+    log
   });
 
   if (attachmentsInfo.length) {
@@ -1907,9 +1943,12 @@ export async function analyzeDocuments({
 
   setMetadata('promptId', effectivePromptId ?? '', { allowEmpty: true });
   setMetadata('promptName', effectivePromptName ?? '', { allowEmpty: true });
-  setMetadata('attachments', JSON.stringify(attachmentsInfo || []), { allowEmpty: true });
+  setMetadata('attachmentsIncluded', String(Boolean(attachmentsInfo.length)));
   if (attachmentsInfo.length) {
-    setMetadata('attachments_detail', attachmentsInfo.join('\n'));
+    const attachmentsDetail = attachmentsInfo.join('\n');
+    setMetadata('attachments_preview', attachmentsDetail.slice(0, 200), { allowEmpty: true });
+    setMetadata('attachments_preview_len', String(attachmentsDetail.length));
+    setMetadata('attachments_count', String(attachmentsInfo.length));
   }
   setMetadata('ragUsed', String(Boolean(ragInfo.used && ragInfo.context)));
   setMetadata('originalFileUploaded', String(Boolean(originalFileUpload?.fileId)));
@@ -1925,47 +1964,26 @@ export async function analyzeDocuments({
     setMetadata('adaptiveDocumentType', adaptiveSummary.documentType);
   }
   if (adaptivePromptAddendum) {
-    setMetadata('adaptivePromptAddendum', adaptivePromptAddendum);
+    setMetadata('adaptivePromptAddendumIncluded', 'true');
+    const preview = adaptivePromptAddendum.slice(0, 200);
+    setMetadata('adaptivePromptAddendum_preview', preview, { allowEmpty: true });
+    setMetadata('adaptivePromptAddendum_len', String(adaptivePromptAddendum.length));
   }
   if (adaptiveLayoutBrief) {
-    setMetadata('adaptiveLayoutBrief', adaptiveLayoutBrief);
+    const preview = adaptiveLayoutBrief.slice(0, 200);
+    setMetadata('adaptiveLayoutBrief_preview', preview, { allowEmpty: true });
+    setMetadata('adaptiveLayoutBrief_len', String(adaptiveLayoutBrief.length));
   }
   if (adaptiveAnswerText) {
-    setMetadata('adaptiveAnswers', adaptiveAnswerText);
+    const preview = adaptiveAnswerText.slice(0, 200);
+    setMetadata('adaptiveAnswers_preview', preview, { allowEmpty: true });
+    setMetadata('adaptiveAnswers_len', String(adaptiveAnswerText.length));
   }
-  const metadataOverflowNotices = [];
-  const setMetadataChunks = (key, value, { allowEmpty = false, chunkSize = MAX_METADATA_VALUE_LENGTH } = {}) => {
-    if (value === null || value === undefined) return;
-    const rawString = String(value);
-    if (!allowEmpty && !rawString.trim()) return;
-
-    const chunks = splitStringIntoChunks(rawString, chunkSize);
-    if (!chunks.length) return;
-
-    chunks.forEach((chunk, index) => {
-      const chunkKey = index === 0 ? key : `${key}_part${index + 1}`;
-      setMetadata(chunkKey, chunk, { allowEmpty: true, maxLength: chunkSize });
-    });
-
-    if (chunks.length > 1) {
-      setMetadata(`${key}_length`, rawString.length, { allowEmpty: true });
-      metadataOverflowNotices.push({ key, parts: chunks.length, totalLength: rawString.length });
-    }
-  };
   if (adaptiveDeveloperPrompt) {
-    setMetadataChunks('adaptiveDeveloperPrompt', adaptiveDeveloperPrompt, { allowEmpty: true });
-  }
-  if (metadataOverflowNotices.length) {
-    metadataOverflowNotices.forEach(({ key, parts, totalLength }) => {
-      log({
-        level: 'info',
-        message: `Metadata поле ${key} разбито на ${parts} сегмент(а) для передачи полного значения`,
-        scope: 'openai',
-        key,
-        parts,
-        totalLength
-      });
-    });
+    setMetadata('adaptiveDeveloperPromptIncluded', 'true');
+    const preview = adaptiveDeveloperPrompt.slice(0, 200);
+    setMetadata('adaptiveDeveloperPrompt_preview', preview, { allowEmpty: true });
+    setMetadata('adaptiveDeveloperPrompt_len', String(adaptiveDeveloperPrompt.length));
   }
 
   const payload = {
