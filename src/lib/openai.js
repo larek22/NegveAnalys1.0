@@ -47,6 +47,7 @@ const DEFAULT_ANALYSIS_SETTINGS = {
 
 const MAX_TEXT_CHARS = 120_000;
 const MAX_METADATA_VALUE_LENGTH = 500;
+const MAX_METADATA_PROPERTIES = 16;
 const DEFAULT_LAYOUT_MODEL = 'gpt-5-mini';
 const MAX_LAYOUT_INPUT_CHARS = 20_000;
 const MAX_LAYOUT_SECTION_ITEMS = Object.freeze({
@@ -307,6 +308,72 @@ const clampMetadataValue = (value, maxLength = MAX_METADATA_VALUE_LENGTH) => {
     return stringValue;
   }
   return stringValue.slice(0, maxLength);
+};
+
+const normalizeMetadataPreview = (value) => {
+  if (!value) return '';
+  return String(value)
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
+const formatMetadataInfo = ({ included, length, preview, extra = [] }) => {
+  const parts = [];
+  if (typeof included === 'boolean') {
+    parts.push(`included=${included ? 'true' : 'false'}`);
+  }
+  if (Number.isFinite(length)) {
+    parts.push(`len=${length}`);
+  }
+  if (Array.isArray(extra)) {
+    for (const item of extra) {
+      if (item) {
+        parts.push(item);
+      }
+    }
+  }
+  const normalizedPreview = normalizeMetadataPreview(preview);
+  if (normalizedPreview) {
+    parts.push(`preview=${normalizedPreview}`);
+  }
+  return parts.join('; ');
+};
+
+const finalizeMetadataEntries = (entries, { log } = {}) => {
+  if (!Array.isArray(entries) || !entries.length) {
+    return {};
+  }
+  const sorted = entries
+    .slice()
+    .sort((a, b) => {
+      const priorityDiff = (a.priority || 0) - (b.priority || 0);
+      if (priorityDiff !== 0) {
+        return priorityDiff;
+      }
+      return (a.order || 0) - (b.order || 0);
+    });
+  const metadata = {};
+  const dropped = [];
+  for (const entry of sorted) {
+    if (Object.prototype.hasOwnProperty.call(metadata, entry.key)) {
+      continue;
+    }
+    if (Object.keys(metadata).length >= MAX_METADATA_PROPERTIES) {
+      dropped.push(entry.key);
+      continue;
+    }
+    metadata[entry.key] = entry.value;
+  }
+  if (dropped.length && typeof log === 'function') {
+    log({
+      level: 'warn',
+      scope: 'openai',
+      message: 'Metadata trimmed to satisfy OpenAI property limit',
+      droppedMetadataKeys: dropped,
+      keptMetadataKeys: Object.keys(metadata)
+    });
+  }
+  return metadata;
 };
 
 const splitStringIntoChunks = (value, chunkSize = MAX_METADATA_VALUE_LENGTH) => {
@@ -1915,8 +1982,12 @@ export async function analyzeDocuments({
     }
   }
 
-  const metadata = {};
-  const setMetadata = (key, value, { allowEmpty = false, maxLength = MAX_METADATA_VALUE_LENGTH } = {}) => {
+  const metadataEntries = [];
+  const setMetadata = (
+    key,
+    value,
+    { allowEmpty = false, maxLength = MAX_METADATA_VALUE_LENGTH, priority = 0 } = {}
+  ) => {
     if (value === null || value === undefined) {
       return;
     }
@@ -1928,7 +1999,7 @@ export async function analyzeDocuments({
     if (clamped === null) {
       return;
     }
-    if (clamped.length < rawString.length) {
+    if (clamped.length < rawString.length && typeof log === 'function') {
       log({
         level: 'warn',
         message: `Metadata поле ${key} обрезано до ${maxLength} символов (лимит OpenAI — 512; превышение вызывает ошибку 400).`,
@@ -1938,53 +2009,84 @@ export async function analyzeDocuments({
         truncatedLength: clamped.length
       });
     }
-    metadata[key] = clamped;
+    metadataEntries.push({ key, value: clamped, priority, order: metadataEntries.length });
   };
 
-  setMetadata('promptId', effectivePromptId ?? '', { allowEmpty: true });
-  setMetadata('promptName', effectivePromptName ?? '', { allowEmpty: true });
-  setMetadata('attachmentsIncluded', String(Boolean(attachmentsInfo.length)));
-  if (attachmentsInfo.length) {
-    const attachmentsDetail = attachmentsInfo.join('\n');
-    setMetadata('attachments_preview', attachmentsDetail.slice(0, 200), { allowEmpty: true });
-    setMetadata('attachments_preview_len', String(attachmentsDetail.length));
-    setMetadata('attachments_count', String(attachmentsInfo.length));
+  setMetadata('promptId', effectivePromptId ?? '', { allowEmpty: true, priority: -2 });
+  setMetadata('promptName', effectivePromptName ?? '', { allowEmpty: true, priority: -2 });
+
+  const attachmentsDetail = attachmentsInfo.join('\n');
+  const attachmentsIncluded = attachmentsInfo.length > 0;
+  const attachmentsSummary = formatMetadataInfo({
+    included: attachmentsIncluded,
+    length: attachmentsIncluded ? attachmentsDetail.length : undefined,
+    preview: attachmentsIncluded ? attachmentsDetail.slice(0, 200) : '',
+    extra: attachmentsIncluded ? [`count=${attachmentsInfo.length}`] : []
+  });
+  if (attachmentsSummary) {
+    setMetadata('attachmentsSummary', attachmentsSummary, { allowEmpty: true, priority: -1 });
   }
-  setMetadata('ragUsed', String(Boolean(ragInfo.used && ragInfo.context)));
-  setMetadata('originalFileUploaded', String(Boolean(originalFileUpload?.fileId)));
-  if (originalFileUpload?.fileId) {
-    setMetadata('originalFileId', originalFileUpload.fileId);
-    if (Number.isFinite(Number(originalFileUpload.bytes))) {
-      setMetadata('originalFileSize', String(originalFileUpload.bytes));
-    } else if (Number.isFinite(Number(meta?.originalSize))) {
-      setMetadata('originalFileSize', String(Number(meta.originalSize)));
-    }
+
+  setMetadata('ragUsed', String(Boolean(ragInfo.used && ragInfo.context)), { priority: -1 });
+
+  const originalFileUploaded = Boolean(originalFileUpload?.fileId);
+  const originalFileSize = Number.isFinite(Number(originalFileUpload?.bytes))
+    ? Number(originalFileUpload.bytes)
+    : Number.isFinite(Number(meta?.originalSize))
+    ? Number(meta.originalSize)
+    : null;
+  const originalFileInfo = formatMetadataInfo({
+    included: originalFileUploaded,
+    extra: [
+      originalFileUploaded && originalFileUpload.fileId ? `id=${originalFileUpload.fileId}` : null,
+      Number.isFinite(originalFileSize) ? `sizeBytes=${originalFileSize}` : null
+    ]
+  });
+  if (originalFileInfo) {
+    setMetadata('originalFileInfo', originalFileInfo, { priority: 0 });
   }
   if (adaptiveSummary?.documentType) {
-    setMetadata('adaptiveDocumentType', adaptiveSummary.documentType);
+    setMetadata('adaptiveDocumentType', adaptiveSummary.documentType, { priority: 0 });
   }
   if (adaptivePromptAddendum) {
-    setMetadata('adaptivePromptAddendumIncluded', 'true');
     const preview = adaptivePromptAddendum.slice(0, 200);
-    setMetadata('adaptivePromptAddendum_preview', preview, { allowEmpty: true });
-    setMetadata('adaptivePromptAddendum_len', String(adaptivePromptAddendum.length));
+    const info = formatMetadataInfo({
+      included: true,
+      length: adaptivePromptAddendum.length,
+      preview,
+      extra: []
+    });
+    setMetadata('adaptivePromptAddendumInfo', info, { priority: 1 });
   }
   if (adaptiveLayoutBrief) {
     const preview = adaptiveLayoutBrief.slice(0, 200);
-    setMetadata('adaptiveLayoutBrief_preview', preview, { allowEmpty: true });
-    setMetadata('adaptiveLayoutBrief_len', String(adaptiveLayoutBrief.length));
+    const info = formatMetadataInfo({
+      included: true,
+      length: adaptiveLayoutBrief.length,
+      preview
+    });
+    setMetadata('adaptiveLayoutBriefInfo', info, { priority: 1 });
   }
   if (adaptiveAnswerText) {
     const preview = adaptiveAnswerText.slice(0, 200);
-    setMetadata('adaptiveAnswers_preview', preview, { allowEmpty: true });
-    setMetadata('adaptiveAnswers_len', String(adaptiveAnswerText.length));
+    const info = formatMetadataInfo({
+      included: true,
+      length: adaptiveAnswerText.length,
+      preview
+    });
+    setMetadata('adaptiveAnswersInfo', info, { priority: 1 });
   }
   if (adaptiveDeveloperPrompt) {
-    setMetadata('adaptiveDeveloperPromptIncluded', 'true');
     const preview = adaptiveDeveloperPrompt.slice(0, 200);
-    setMetadata('adaptiveDeveloperPrompt_preview', preview, { allowEmpty: true });
-    setMetadata('adaptiveDeveloperPrompt_len', String(adaptiveDeveloperPrompt.length));
+    const info = formatMetadataInfo({
+      included: true,
+      length: adaptiveDeveloperPrompt.length,
+      preview
+    });
+    setMetadata('adaptiveDeveloperPromptInfo', info, { priority: 1 });
   }
+
+  const metadata = finalizeMetadataEntries(metadataEntries, { log });
 
   const payload = {
     model,
