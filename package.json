@@ -1,0 +1,28 @@
+{
+  "name": "DOKNEG-optima",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "proxy:qdrant": "node server/qdrantProxy.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "framer-motion": "^12.23.24",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.372.0",
+    "pdfjs-dist": "^5.4.296",
+    "express": "^4.19.2",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^7.9.4"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^14.1.2",
+    "@vitejs/plugin-react": "^4.2.1",
+    "vite": "^5.2.0"
+  }
+}
