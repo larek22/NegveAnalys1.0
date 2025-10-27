@@ -607,7 +607,9 @@ const buildInputMessages = ({
   attachmentsInfo = [],
   adaptivePromptDisplay = '',
   adaptiveAnswerText = '',
-  adaptiveSummary = null
+  adaptiveSummary = null,
+  adaptiveDeveloperPrompt = '',
+  adaptivePromptAddendum = ''
 }) => {
   const { block, truncated, originalLength } = buildDocumentBlock(document);
   const pageImages = Array.isArray(document?.meta?.pageImages) ? document.meta.pageImages : [];
@@ -644,7 +646,13 @@ const buildInputMessages = ({
     .filter(Boolean)
     .join('\n\n');
 
-  const developerText = developerPromptText || LEGAL_ANALYSIS_PROMPT;
+  const developerText = [
+    adaptiveDeveloperPrompt && `# Adaptive developer prompt\n${adaptiveDeveloperPrompt}`,
+    developerPromptText || LEGAL_ANALYSIS_PROMPT,
+    adaptivePromptAddendum && `# Adaptive addendum\n${adaptivePromptAddendum}`
+  ]
+    .filter(Boolean)
+    .join('\n\n');
   const universalText = sanitizeText(universalPromptText || '');
 
   const universalBlock = universalText
@@ -1794,6 +1802,8 @@ export async function analyzeDocuments({
     fileParts,
     ragContext: '',
     attachmentsInfo,
+    adaptiveDeveloperPrompt,
+    adaptivePromptAddendum,
     adaptivePromptDisplay: adaptivePromptAddendum,
     adaptiveAnswerText,
     adaptiveSummary
