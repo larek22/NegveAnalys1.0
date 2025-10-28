@@ -13,6 +13,7 @@ import {
 } from '../lib/openai.js';
 import { MAX_FILE_SIZE_BYTES } from '../lib/config.js';
 import { formatFileSize } from '../lib/telegram.js';
+import { ANALYSIS_FLOW_MODES } from '../lib/analysisFlowDefaults.js';
 
 const ACCENT_COLOR = '#C9A86A';
 const LOG_STORAGE_KEY = 'dokneg-optima:analysis-log';
@@ -153,7 +154,7 @@ const Step = ({ index, label, status }) => {
   );
 };
 
-const STAGE_MESSAGES = {
+const BASE_STAGE_MESSAGES = {
   reading: {
     icon: Loader2,
     spinning: true,
@@ -679,6 +680,39 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
 
   const cloudinaryConfig = gptSettings.analysis?.cloudinary || {};
 
+  const analysisFlowMode = gptSettings.analysis?.analysisFlow || ANALYSIS_FLOW_MODES.NEW_BETA_TWO;
+  const isLegacyFlow = analysisFlowMode === ANALYSIS_FLOW_MODES.OLD;
+  const isDualStageFlow = analysisFlowMode === ANALYSIS_FLOW_MODES.NEW_BETA;
+  const isTripleStageFlow = analysisFlowMode === ANALYSIS_FLOW_MODES.NEW_BETA_TWO;
+  const usesAutomatedFlow = !isLegacyFlow;
+
+  const stageMessages = useMemo(() => {
+    if (!usesAutomatedFlow) {
+      return BASE_STAGE_MESSAGES;
+    }
+    const analyzingTitle = isTripleStageFlow
+      ? 'Шаг 3 — Трёхэтапный анализ'
+      : 'Шаг 3 — Двухэтапный анализ';
+    const analyzingNote = isTripleStageFlow
+      ? 'Этап 1/3: gpt-5-mini готовит черновой отчёт. Этап 2/3: gpt-5 усиливает выводы. Этап 3/3: gpt-5-mini с web search проводит факт-чекинг.'
+      : 'Этап 1/2: gpt-5-mini готовит черновой отчёт. Этап 2/2: gpt-5 с web search проверяет документ и усиливает выводы.';
+    const summaryNote = isTripleStageFlow
+      ? 'Проверьте сводку и ответы. Новый режим выполнит три последовательных запроса: gpt-5-mini → gpt-5 → gpt-5-mini с web search.'
+      : 'Проверьте сводку и ответы. Новый режим выполнит два последовательных запроса: gpt-5-mini → gpt-5 с web search.';
+    return {
+      ...BASE_STAGE_MESSAGES,
+      analyzing: {
+        ...BASE_STAGE_MESSAGES.analyzing,
+        title: analyzingTitle,
+        note: analyzingNote
+      },
+      'summary-ready': {
+        ...BASE_STAGE_MESSAGES['summary-ready'],
+        note: summaryNote
+      }
+    };
+  }, [usesAutomatedFlow, isTripleStageFlow]);
+
   const resetState = useCallback(() => {
     setDocumentRecord(null);
     setTriageResult(null);
@@ -751,8 +785,64 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
       setStage('idle');
       return;
     }
+
     let cancelled = false;
-    const run = async () => {
+
+    if (usesAutomatedFlow) {
+      const runAutomatedFlow = async () => {
+        try {
+          setStage('analyzing');
+          setIsAnalyzing(true);
+          setTriageResult(null);
+          setSummaryPreview(null);
+          setAnswers({});
+          setFreeText('');
+          setAnalysisResult(null);
+          setLayoutResult(null);
+          appendLogEntry({
+            level: 'info',
+            scope: 'analysis',
+            message: isTripleStageFlow
+              ? 'Запуск трёхэтапного анализа (New Beta 2.0)'
+              : 'Запуск двухэтапного анализа (New Beta)'
+          });
+          const result = await analyzeDocuments({
+            apiKey,
+            documents: [documentRecord],
+            settings: gptSettings.analysis,
+            adaptive: null,
+            onLog: appendLogEntry
+          });
+          if (cancelled) return;
+          setAnalysisResult(result);
+          appendLogEntry({
+            level: 'info',
+            scope: 'analysis',
+            message: isTripleStageFlow
+              ? 'Трёхэтапный анализ завершён'
+              : 'Двухэтапный анализ завершён'
+          });
+          setStage('done');
+        } catch (err) {
+          if (cancelled) return;
+          const message = err?.message || 'Не удалось выполнить анализ.';
+          setError(message);
+          appendLogEntry({ level: 'error', scope: 'analysis', message });
+          setStage('idle');
+        } finally {
+          if (!cancelled) {
+            setIsAnalyzing(false);
+          }
+        }
+      };
+
+      runAutomatedFlow();
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const runAdaptive = async () => {
       try {
         setStage('triage');
         appendLogEntry({ level: 'info', scope: 'adaptive', message: 'Запуск адаптивного анализа документа' });
@@ -790,11 +880,17 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
       }
     };
 
-    run();
+    runAdaptive();
     return () => {
       cancelled = true;
     };
-  }, [apiKey, documentRecord, gptSettings.analysis]);
+  }, [
+    apiKey,
+    documentRecord,
+    gptSettings.analysis,
+    usesAutomatedFlow,
+    isTripleStageFlow
+  ]);
 
   const handleDrop = useCallback(
     (event) => {
@@ -956,7 +1052,7 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
   const themeClass = getThemeClass(theme);
   const summaryReady = stage === 'summary-ready';
   const showUploadCard = stage === 'idle';
-  const stageInfo = STAGE_MESSAGES[stage] || null;
+  const stageInfo = stageMessages[stage] || null;
   const StageIcon = stageInfo?.icon || null;
   const targetProgress = useMemo(() => STAGE_PROGRESS[stage] ?? 0, [stage]);
   const roundedProgress = Math.max(0, Math.min(100, Math.round(progressPercent)));
@@ -1029,6 +1125,62 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
     [layoutResult, stage]
   );
 
+  const progressSteps = useMemo(() => {
+    if (usesAutomatedFlow) {
+      const prepStatus = stage === 'idle' ? 'todo' : stage === 'reading' ? 'active' : 'done';
+      const analysisStatus = stage === 'analyzing' ? 'active' : stage === 'done' ? 'done' : 'todo';
+      const label = isTripleStageFlow
+        ? 'Трёхэтапный анализ (gpt-5-mini → gpt-5 → gpt-5-mini + web search)'
+        : 'Двухэтапный анализ (gpt-5-mini → gpt-5 + web search)';
+      return [
+        { index: 1, label: 'Подготовка', status: prepStatus },
+        { index: 2, label, status: analysisStatus }
+      ];
+    }
+    return [
+      { index: 1, label: 'Подготовка', status: stepStatus(1) },
+      { index: 2, label: 'Предварительный анализ', status: stepStatus(2) },
+      { index: 3, label: 'Глубокий анализ', status: stepStatus(3) },
+      { index: 4, label: 'Оформление', status: stepStatus(4) }
+    ];
+  }, [usesAutomatedFlow, isTripleStageFlow, stage, stepStatus]);
+
+  const heroTitle = usesAutomatedFlow
+    ? isTripleStageFlow
+      ? 'Анализ юридических документов в три шага (3 запроса к GPT)'
+      : 'Анализ юридических документов в два шага (2 запроса к GPT)'
+    : 'Анализ юридических документов в три шага';
+
+  const heroSubtitle = usesAutomatedFlow
+    ? isTripleStageFlow
+      ? 'Загрузите договор или иной документ — gpt-5-mini подготовит детальный черновик, gpt-5 усилит его, а затем gpt-5-mini с web search выполнит факт-чекинг и вернёт финальный отчёт.'
+      : 'Загрузите договор или иной документ — gpt-5-mini подготовит детальный черновик, затем gpt-5 с web search усилит выводы и вернёт финальный отчёт.'
+    : 'Загрузите документ, ответьте на уточняющие вопросы, получите глубокий анализ и оформленный отчёт готовый к печати.';
+
+  const startAnalysisSubtitle = usesAutomatedFlow
+    ? isTripleStageFlow
+      ? 'GPT выполнит три итерации: сначала gpt-5-mini подготовит черновик, затем gpt-5 усилит отчёт, после чего gpt-5-mini с web search проведёт факт-чекинг.'
+      : 'GPT выполнит две итерации: сначала gpt-5-mini подготовит черновик, затем gpt-5 с web search усилит отчёт.'
+    : 'GPT учтёт выбранные ответы и комментарии при подготовке отчёта';
+
+  const startAnalysisButtonLabel = usesAutomatedFlow
+    ? isTripleStageFlow
+      ? 'Запустить трёхэтапный анализ'
+      : 'Запустить двухэтапный анализ'
+    : 'Начать анализ';
+
+  const finalReportTitle = usesAutomatedFlow
+    ? isTripleStageFlow
+      ? 'Финальный текст (этап 3 — GPT-5-mini + web search)'
+      : 'Финальный текст (этап 2 — GPT-5 + web search)'
+    : 'Финальный текст анализа';
+
+  const finalReportSubtitle = usesAutomatedFlow
+    ? isTripleStageFlow
+      ? 'Это ответ третьего запроса. Используйте его напрямую или передайте в модуль оформления.'
+      : 'Это ответ второго запроса. Используйте его напрямую или передайте в модуль оформления.'
+    : 'Используйте отчёт для подготовки итогового документа.';
+
   return (
     <div className={`negve-page ${themeClass}`} data-theme={themeClass}>
       <div className="negve-page__decor negve-page__decor--primary" />
@@ -1067,15 +1219,14 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5 }}
           >
-            Анализ юридических документов в три шага
+            {heroTitle}
           </motion.h1>
           <motion.p
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6, delay: 0.05 }}
           >
-            Загрузите договор или иной документ, получите уточняющие вопросы, глубокий анализ и оформленный отчёт готовый для
-            печати.
+            {heroSubtitle}
           </motion.p>
         </section>
 
@@ -1166,10 +1317,9 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
                   </div>
                 </div>
                 <div className="negve-progress__steps">
-                  <Step index={1} label="Подготовка" status={stepStatus(1)} />
-                  <Step index={2} label="Предварительный анализ" status={stepStatus(2)} />
-                  <Step index={3} label="Глубокий анализ" status={stepStatus(3)} />
-                  <Step index={4} label="Оформление" status={stepStatus(4)} />
+                  {progressSteps.map((item) => (
+                    <Step key={item.index} index={item.index} label={item.label} status={item.status} />
+                  ))}
                 </div>
                 {fileInfo && (
                   <div className="negve-status__file">
@@ -1212,7 +1362,7 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
             <div className="negve-card__header negve-card__header--compact">
               <div>
                 <div className="negve-card__title">Шаг 2. Подтвердите старт глубокого анализа</div>
-                <div className="negve-card__subtitle">GPT учтёт выбранные ответы и комментарии при подготовке отчёта</div>
+                <div className="negve-card__subtitle">{startAnalysisSubtitle}</div>
               </div>
               <div className="negve-card__header-actions">
                 <button
@@ -1227,7 +1377,7 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
                     </>
                   ) : (
                     <>
-                      <ArrowRight className="negve-icon" /> Начать анализ
+                      <ArrowRight className="negve-icon" /> {startAnalysisButtonLabel}
                     </>
                   )}
                 </button>
@@ -1265,43 +1415,95 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
 
         {stage === 'done' && (
           <section className="negve-results">
-            <div className="negve-card negve-card--result">
-              <div className="negve-card__header">
-                <div>
-                  <div className="negve-card__title">Итоговый отчёт</div>
-                  <div className="negve-card__subtitle">Карточная презентация, готовая для отправки и печати</div>
+            {analysisResult?.reportText && (
+              <div className="negve-card negve-card--result">
+                <div className="negve-card__header">
+                  <div>
+                    <div className="negve-card__title">{finalReportTitle}</div>
+                    <div className="negve-card__subtitle">{finalReportSubtitle}</div>
+                  </div>
                 </div>
-                <div className="negve-card__header-actions">
-                  <button
-                    type="button"
-                    className="negve-button negve-button--ghost"
-                    onClick={handleDownloadLayout}
-                    disabled={!layoutResult?.layout}
-                  >
-                    <Download className="negve-icon" /> Скачать HTML
-                  </button>
-                  <button
-                    type="button"
-                    className="negve-button negve-button--ghost"
-                    onClick={handlePrintLayout}
-                    disabled={!layoutResult?.layout}
-                  >
-                    <Printer className="negve-icon" /> Печать
-                  </button>
+                <div className="negve-card__block" style={{ maxHeight: '420px', overflowY: 'auto' }}>
+                  <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+                    <LinkifiedText text={analysisResult.reportText} />
+                  </div>
                 </div>
               </div>
-              <div className="negve-card__block">
-                {layoutResult?.layout ? (
-                  <LayoutReport
-                    layout={layoutResult.layout}
-                    fallbackHint={triageResult?.layoutBrief || ''}
-                    sources={webSources}
-                  />
-                ) : (
-                  <div className="negve-placeholder">Не удалось сформировать макет отчёта.</div>
-                )}
+            )}
+            {usesAutomatedFlow && analysisResult?.stages?.initial?.reportText && (
+              <div className="negve-card negve-card--result">
+                <details>
+                  <summary>
+                    Черновой отчёт (этап 1 — {analysisResult.stages.initial.model || 'gpt-5-mini'})
+                  </summary>
+                  <div style={{ marginTop: '12px', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+                    <LinkifiedText text={analysisResult.stages.initial.reportText} />
+                  </div>
+                </details>
               </div>
-            </div>
+            )}
+            {isTripleStageFlow && analysisResult?.stages?.refinement?.reportText && (
+              <div className="negve-card negve-card--result">
+                <details>
+                  <summary>
+                    Усиленный отчёт (этап 2 — {analysisResult.stages.refinement.model || 'gpt-5'})
+                  </summary>
+                  <div style={{ marginTop: '12px', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+                    <LinkifiedText text={analysisResult.stages.refinement.reportText} />
+                  </div>
+                </details>
+              </div>
+            )}
+            {!usesAutomatedFlow ? (
+              <div className="negve-card negve-card--result">
+                <div className="negve-card__header">
+                  <div>
+                    <div className="negve-card__title">Итоговый отчёт</div>
+                    <div className="negve-card__subtitle">Карточная презентация, готовая для отправки и печати</div>
+                  </div>
+                  <div className="negve-card__header-actions">
+                    <button
+                      type="button"
+                      className="negve-button negve-button--ghost"
+                      onClick={handleDownloadLayout}
+                      disabled={!layoutResult?.layout}
+                    >
+                      <Download className="negve-icon" /> Скачать HTML
+                    </button>
+                    <button
+                      type="button"
+                      className="negve-button negve-button--ghost"
+                      onClick={handlePrintLayout}
+                      disabled={!layoutResult?.layout}
+                    >
+                      <Printer className="negve-icon" /> Печать
+                    </button>
+                  </div>
+                </div>
+                <div className="negve-card__block">
+                  {layoutResult?.layout ? (
+                    <LayoutReport
+                      layout={layoutResult.layout}
+                      fallbackHint={triageResult?.layoutBrief || ''}
+                      sources={webSources}
+                    />
+                  ) : (
+                    <div className="negve-placeholder">Не удалось сформировать макет отчёта.</div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="negve-card negve-card--result">
+                <div className="negve-card__header">
+                  <div>
+                    <div className="negve-card__title">Оформление отключено</div>
+                    <div className="negve-card__subtitle">
+                      Новый режим выполняет только два запроса к GPT. При необходимости запустите форматирование вручную в старом режиме.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div className="negve-results__footer">
               <button type="button" className="negve-button negve-button--ghost" onClick={handleResetWorkflow}>
