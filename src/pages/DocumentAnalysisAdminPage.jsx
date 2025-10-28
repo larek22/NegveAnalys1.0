@@ -4,6 +4,7 @@ import { BookOpenCheck, Cloud, FileText, LogOut, RefreshCw, Save, ScrollText, Sh
 import { useApiKey } from '../hooks/useApiKey.js';
 import { useGptSettings } from '../hooks/useGptSettings.js';
 import { getThemeClass } from '../hooks/useTheme.js';
+import { ANALYSIS_FLOW_MODES } from '../lib/analysisFlowDefaults.js';
 
 const LOG_STORAGE_KEY = 'dokneg-optima:analysis-log';
 const REASONING_OPTIONS = [
@@ -86,7 +87,11 @@ const DocumentAnalysisAdminPage = ({ theme, onToggleTheme }) => {
   const [status, setStatus] = useState('saved'); // saved | dirty | saving
   const [logs, setLogs] = useState(() => readLogs());
 
-  const isNewBetaFlow = (draft.analysisFlow || 'new-beta') !== 'old';
+  const flowMode = draft.analysisFlow || ANALYSIS_FLOW_MODES.NEW_BETA_TWO;
+  const isOldFlow = flowMode === ANALYSIS_FLOW_MODES.OLD;
+  const isNewBetaFlow = flowMode === ANALYSIS_FLOW_MODES.NEW_BETA;
+  const isNewBetaTwoFlow = flowMode === ANALYSIS_FLOW_MODES.NEW_BETA_TWO;
+  const isModernFlow = !isOldFlow;
 
   useEffect(() => {
     setDraft(gptSettings.analysis);
@@ -281,24 +286,29 @@ const DocumentAnalysisAdminPage = ({ theme, onToggleTheme }) => {
           </div>
           <div>
             <h2>Режим анализа</h2>
-            <p>Переключение между новым двухэтапным анализом и предыдущей схемой.</p>
+            <p>Выберите между трёхэтапным New Beta 2.0, прошлой двухэтапной схемой и классическим режимом.</p>
           </div>
         </div>
         <div className="admin-card__body admin-card__body--stack">
           <div className="admin-field">
             <span>Variant</span>
-            <select value={draft.analysisFlow || 'new-beta'} onChange={handleInput('analysisFlow')}>
-              <option value="new-beta">New Beta — два запроса (gpt-5-mini → gpt-5)</option>
-              <option value="old">Old — один запрос (только текущая модель)</option>
+            <select value={flowMode} onChange={handleInput('analysisFlow')}>
+              <option value={ANALYSIS_FLOW_MODES.NEW_BETA_TWO}>
+                New Beta 2.0 — три запроса (gpt-5-mini → gpt-5 → gpt-5-mini + web search)
+              </option>
+              <option value={ANALYSIS_FLOW_MODES.NEW_BETA}>
+                New Beta — два запроса (gpt-5-mini → gpt-5)
+              </option>
+              <option value={ANALYSIS_FLOW_MODES.OLD}>Old — один запрос (только текущая модель)</option>
             </select>
             <small>
-              New Beta сначала строит глубокий черновой отчёт, затем усиливает его моделью GPT-5 с web search.
-              При необходимости можно вернуть прошлую реализацию одним переключателем.
+              New Beta 2.0 добавляет финальный факт-чекинг gpt-5-mini с web search. При необходимости можно вернуться к предыдущим
+              вариантам одним переключателем.
             </small>
           </div>
         </div>
       </div>
-      {isNewBetaFlow && (
+      {isModernFlow && (
         <>
           <div className="admin-card">
             <div className="admin-card__header">
@@ -306,9 +316,9 @@ const DocumentAnalysisAdminPage = ({ theme, onToggleTheme }) => {
                 <Shield size={18} />
               </div>
               <div>
-                <h2>New Beta — Этап 1 (gpt-5-mini)</h2>
+                <h2>{isNewBetaTwoFlow ? 'New Beta 2.0 — Этап 1 (gpt-5-mini)' : 'New Beta — Этап 1 (gpt-5-mini)'}</h2>
                 <p>
-                  Загружаем документ и изображения, готовим черновой отчёт и персональный developer prompt для второго шага.
+                  Загружаем документ и изображения, готовим черновой отчёт и персональный developer prompt для следующих шагов.
                 </p>
               </div>
             </div>
@@ -362,8 +372,16 @@ const DocumentAnalysisAdminPage = ({ theme, onToggleTheme }) => {
                 <ScrollText size={18} />
               </div>
               <div>
-                <h2>New Beta — Этап 2 (gpt-5 + web search)</h2>
-                <p>Проверяем черновик, усиливаем отчёт и расширяем анализ с помощью веб-поиска.</p>
+                <h2>
+                  {isNewBetaTwoFlow
+                    ? 'New Beta 2.0 — Этап 2 (gpt-5 без web search)'
+                    : 'New Beta — Этап 2 (gpt-5 + web search)'}
+                </h2>
+                <p>
+                  {isNewBetaTwoFlow
+                    ? 'Усиливаем отчёт моделью GPT-5 на основе первого шага. Web search отключён, чтобы сохранить чистый вывод перед факт-чекингом.'
+                    : 'Проверяем черновик, усиливаем отчёт и расширяем анализ с помощью веб-поиска.'}
+                </p>
               </div>
             </div>
             <div className="admin-card__body admin-card__body--grid">
@@ -376,19 +394,24 @@ const DocumentAnalysisAdminPage = ({ theme, onToggleTheme }) => {
                 <label className="admin-toggle">
                   <input
                     type="checkbox"
-                    checked={Boolean(draft.newBetaStageTwoWebSearchEnabled)}
+                    checked={Boolean(draft.newBetaStageTwoWebSearchEnabled) && !isNewBetaTwoFlow}
                     onChange={handleToggle('newBetaStageTwoWebSearchEnabled')}
+                    disabled={isNewBetaTwoFlow}
                   />
                   <span />
                 </label>
-                <small>Оставьте включённым, чтобы GPT-5 привлекал внешние источники.</small>
+                <small>
+                  {isNewBetaTwoFlow
+                    ? 'В режиме New Beta 2.0 второй шаг выполняется без web search — настройка недоступна.'
+                    : 'Оставьте включённым, чтобы GPT-5 привлекал внешние источники.'}
+                </small>
               </div>
               <div className="admin-field">
                 <span>Глубина поиска</span>
                 <select
                   value={draft.newBetaStageTwoWebSearchDepth || 'high'}
                   onChange={handleInput('newBetaStageTwoWebSearchDepth')}
-                  disabled={!draft.newBetaStageTwoWebSearchEnabled}
+                  disabled={!draft.newBetaStageTwoWebSearchEnabled || isNewBetaTwoFlow}
                 >
                   {WEB_SEARCH_DEPTH_OPTIONS.map((option) => (
                     <option key={option.value} value={option.value}>
@@ -406,10 +429,70 @@ const DocumentAnalysisAdminPage = ({ theme, onToggleTheme }) => {
                   value={draft.newBetaStageTwoDeveloperPrompt || ''}
                   onChange={handleTextarea('newBetaStageTwoDeveloperPrompt')}
                 />
-                <small>Используется для финального усиления отчёта моделью gpt-5.</small>
+                <small>
+                  {isNewBetaTwoFlow
+                    ? 'Используется для промежуточного усиления отчёта моделью gpt-5 перед финальным факт-чекингом.'
+                    : 'Используется для финального усиления отчёта моделью gpt-5.'}
+                </small>
               </div>
             </div>
           </div>
+          {isNewBetaTwoFlow && (
+            <div className="admin-card">
+              <div className="admin-card__header">
+                <div className="admin-card__icon admin-card__icon--neutral">
+                  <Shield size={18} />
+                </div>
+                <div>
+                  <h2>New Beta 2.0 — Этап 3 (gpt-5-mini + web search)</h2>
+                  <p>Факт-чекинг усиленного отчёта, исправление неточностей и дополнение выводов.</p>
+                </div>
+              </div>
+              <div className="admin-card__body admin-card__body--grid">
+                <div className="admin-field">
+                  <span>Модель</span>
+                  <input value={draft.newBetaStageThreeModel || ''} onChange={handleInput('newBetaStageThreeModel')} />
+                </div>
+                <div className="admin-field admin-field--toggle">
+                  <span>Web search</span>
+                  <label className="admin-toggle">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(draft.newBetaStageThreeWebSearchEnabled)}
+                      onChange={handleToggle('newBetaStageThreeWebSearchEnabled')}
+                    />
+                    <span />
+                  </label>
+                  <small>Включите web search, чтобы факт-чекинг опирался на актуальные внешние источники.</small>
+                </div>
+                <div className="admin-field">
+                  <span>Глубина поиска</span>
+                  <select
+                    value={draft.newBetaStageThreeWebSearchDepth || 'high'}
+                    onChange={handleInput('newBetaStageThreeWebSearchDepth')}
+                    disabled={!draft.newBetaStageThreeWebSearchEnabled}
+                  >
+                    {WEB_SEARCH_DEPTH_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="admin-card__body admin-card__body--stack">
+                <div className="admin-field">
+                  <span>Developer message</span>
+                  <textarea
+                    rows={8}
+                    value={draft.newBetaStageThreeDeveloperPrompt || ''}
+                    onChange={handleTextarea('newBetaStageThreeDeveloperPrompt')}
+                  />
+                  <small>Этот текст направляет gpt-5-mini на финальный факт-чекинг и оформление отчёта.</small>
+                </div>
+              </div>
+            </div>
+          )}
         </>
       )}
       {summaryCards.map((card) => {

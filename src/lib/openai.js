@@ -8,6 +8,7 @@ import {
   ANALYSIS_FLOW_MODES,
   DEFAULT_NEW_BETA_STAGE_SETTINGS,
   NEW_BETA_STAGE_ONE_DEVELOPER_PROMPT,
+  NEW_BETA_STAGE_THREE_DEVELOPER_PROMPT,
   NEW_BETA_STAGE_TWO_DEVELOPER_PROMPT
 } from './analysisFlowDefaults.js';
 
@@ -49,7 +50,7 @@ const DEFAULT_ANALYSIS_SETTINGS = {
   developerPromptFromTriage: true,
   localeHint: '',
   prompts: DEFAULT_PROMPT_SETTINGS,
-  analysisFlow: ANALYSIS_FLOW_MODES.NEW_BETA,
+  analysisFlow: ANALYSIS_FLOW_MODES.NEW_BETA_TWO,
   newBetaStageOneModel: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.model,
   newBetaStageOneWebSearchEnabled: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.webSearchEnabled,
   newBetaStageOneWebSearchDepth: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.webSearchDepth,
@@ -57,7 +58,11 @@ const DEFAULT_ANALYSIS_SETTINGS = {
   newBetaStageTwoModel: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.model,
   newBetaStageTwoWebSearchEnabled: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.webSearchEnabled,
   newBetaStageTwoWebSearchDepth: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.webSearchDepth,
-  newBetaStageTwoDeveloperPrompt: NEW_BETA_STAGE_TWO_DEVELOPER_PROMPT
+  newBetaStageTwoDeveloperPrompt: NEW_BETA_STAGE_TWO_DEVELOPER_PROMPT,
+  newBetaStageThreeModel: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.model,
+  newBetaStageThreeWebSearchEnabled: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.webSearchEnabled,
+  newBetaStageThreeWebSearchDepth: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.webSearchDepth,
+  newBetaStageThreeDeveloperPrompt: NEW_BETA_STAGE_THREE_DEVELOPER_PROMPT
 };
 
 const MAX_TEXT_CHARS = 120_000;
@@ -1882,28 +1887,31 @@ export async function analyzeDocuments({
       ]
     : [];
 
-  const analysisFlow = config.analysisFlow || ANALYSIS_FLOW_MODES.NEW_BETA;
+  const analysisFlow = config.analysisFlow || ANALYSIS_FLOW_MODES.NEW_BETA_TWO;
   config.analysisFlow = analysisFlow;
-  const isNewBetaFlow = analysisFlow !== ANALYSIS_FLOW_MODES.OLD;
+  const isOldFlow = analysisFlow === ANALYSIS_FLOW_MODES.OLD;
+  const isNewBetaFlow = analysisFlow === ANALYSIS_FLOW_MODES.NEW_BETA;
+  const isNewBetaTwoFlow = analysisFlow === ANALYSIS_FLOW_MODES.NEW_BETA_TWO;
+  const usesMultiStageFlow = !isOldFlow;
 
   const stageOneDeveloperOverride =
     sanitizeText(config.newBetaStageOneDeveloperPrompt || '') ||
     DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.developerPrompt;
 
-  const developerOverride = isNewBetaFlow
-    ? stageOneDeveloperOverride
-    : adaptiveDeveloperPrompt;
+  const developerOverride = usesMultiStageFlow ? stageOneDeveloperOverride : adaptiveDeveloperPrompt;
 
-  const effectivePromptId = isNewBetaFlow
-    ? 'new-beta-flow'
-    : adaptiveDeveloperPrompt
-    ? 'adaptive-developer'
-    : 'analysis-base';
-  const effectivePromptName = isNewBetaFlow
-    ? 'New Beta dual-stage analysis'
-    : adaptiveDeveloperPrompt
-    ? 'Adaptive developer prompt'
-    : 'Base analysis prompt';
+  const effectivePromptId = (() => {
+    if (isNewBetaTwoFlow) return 'new-beta-2-flow';
+    if (isNewBetaFlow) return 'new-beta-flow';
+    if (adaptiveDeveloperPrompt) return 'adaptive-developer';
+    return 'analysis-base';
+  })();
+  const effectivePromptName = (() => {
+    if (isNewBetaTwoFlow) return 'New Beta 2.0 triple-stage analysis';
+    if (isNewBetaFlow) return 'New Beta dual-stage analysis';
+    if (adaptiveDeveloperPrompt) return 'Adaptive developer prompt';
+    return 'Base analysis prompt';
+  })();
 
   const analysisWebSearchEnabled = Boolean(config.analysisWebSearchEnabled);
   const analysisReasoningEffort = config.analysisReasoningEffort || '';
@@ -2121,7 +2129,7 @@ export async function analyzeDocuments({
 
   const baseMetadataEntries = metadataEntries.map((entry) => ({ ...entry }));
 
-  if (!isNewBetaFlow) {
+  if (isOldFlow) {
     const metadata = finalizeMetadataEntries(baseMetadataEntries, { log });
 
     const payload = {
@@ -2200,7 +2208,7 @@ export async function analyzeDocuments({
       ...baseMetadataEntries,
       {
         key: 'analysisFlow',
-        value: ANALYSIS_FLOW_MODES.NEW_BETA,
+        value: analysisFlow,
         priority: -3,
         order: baseMetadataEntries.length
       },
@@ -2268,6 +2276,13 @@ export async function analyzeDocuments({
     outputPreview: stageOneReport ? stageOneReport.slice(0, 200) : ''
   });
 
+  const stageOneResult = {
+    model: stageOneModel,
+    usage: stageOneResponse?.usage || null,
+    reportText: stageOneReport,
+    raw: stageOneResponse
+  };
+
   const stageTwoOverride =
     sanitizeText(config.newBetaStageTwoDeveloperPrompt || '') ||
     DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.developerPrompt;
@@ -2333,7 +2348,7 @@ export async function analyzeDocuments({
       ...baseMetadataEntries,
       {
         key: 'analysisFlow',
-        value: ANALYSIS_FLOW_MODES.NEW_BETA,
+        value: analysisFlow,
         priority: -3,
         order: baseMetadataEntries.length
       },
@@ -2359,9 +2374,10 @@ export async function analyzeDocuments({
     config.newBetaStageTwoModel,
     DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.model
   );
-  const stageTwoWebSearchEnabled = Boolean(
+  const requestedStageTwoWebSearch = Boolean(
     config.newBetaStageTwoWebSearchEnabled ?? DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.webSearchEnabled
   );
+  const stageTwoWebSearchEnabled = isNewBetaTwoFlow ? false : requestedStageTwoWebSearch;
   const stageTwoWebSearchDepth = sanitizeSearchDepth(
     config.newBetaStageTwoWebSearchDepth ?? DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.webSearchDepth,
     DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.webSearchDepth
@@ -2374,13 +2390,24 @@ export async function analyzeDocuments({
     reasoning: { effort: 'high' }
   };
 
-  applyWebSearchSettings({
+  const stageTwoWebSearchApplied = applyWebSearchSettings({
     payload: stageTwoPayload,
     enabled: stageTwoWebSearchEnabled,
     depth: stageTwoWebSearchEnabled ? stageTwoWebSearchDepth : 'low',
     log,
     scope: 'analysis-stage-2'
   });
+
+  if (!stageTwoWebSearchApplied) {
+    log('Web search отключен для этапа 2', 'debug');
+  }
+  if (isNewBetaTwoFlow && requestedStageTwoWebSearch) {
+    log({
+      level: 'info',
+      scope: 'analysis-stage-2',
+      message: 'Web search отключен на этапе 2 для режима New Beta 2.0'
+    });
+  }
 
   log({
     level: 'info',
@@ -2389,14 +2416,15 @@ export async function analyzeDocuments({
     model: stageTwoModel,
     webSearch: stageTwoWebSearchEnabled,
     webSearchDepth: stageTwoWebSearchEnabled ? stageTwoWebSearchDepth : 'off',
+    webSearchForcedOff: isNewBetaTwoFlow,
     reasoning: 'high',
     attachments: attachmentsInfo,
     initialReportPreview: stageOneReport ? stageOneReport.slice(0, 200) : ''
   });
 
   const stageTwoResponse = await executeRequest(apiKey, stageTwoPayload);
-  const finalReportText = collectOutputText(stageTwoResponse);
-  const finalSources = extractWebSources(stageTwoResponse);
+  const stageTwoReport = collectOutputText(stageTwoResponse);
+  const stageTwoSources = extractWebSources(stageTwoResponse);
 
   log({
     level: 'info',
@@ -2404,15 +2432,207 @@ export async function analyzeDocuments({
     scope: 'analysis',
     model: stageTwoModel,
     tokens: stageTwoResponse?.usage?.total_tokens || null,
-    webSources: finalSources.length,
-    outputPreview: finalReportText ? finalReportText.slice(0, 200) : ''
+    webSources: stageTwoSources.length,
+    outputPreview: stageTwoReport ? stageTwoReport.slice(0, 200) : ''
   });
 
-  return {
-    reportText: finalReportText,
+  const stageTwoResult = {
     model: stageTwoModel,
     usage: stageTwoResponse?.usage || null,
-    sources: finalSources,
+    reportText: stageTwoReport,
+    raw: stageTwoResponse,
+    sources: stageTwoSources
+  };
+
+  if (!isNewBetaTwoFlow) {
+    return {
+      reportText: stageTwoReport,
+      model: stageTwoModel,
+      usage: stageTwoResponse?.usage || null,
+      sources: stageTwoSources,
+      rag: ragInfo,
+      prompt: {
+        id: effectivePromptId,
+        name: effectivePromptName
+      },
+      adaptive: {
+        applied: Boolean(adaptiveDeveloperPrompt || adaptivePromptAddendum || adaptiveAnswerText),
+        developerPrompt: adaptiveDeveloperPrompt,
+        promptAddendum: adaptivePromptAddendum,
+        promptAddendumLines: adaptivePromptLines,
+        answerInstructions: adaptiveAnswerInstructions,
+        summary: adaptiveSummary,
+        layoutBrief: adaptiveLayoutBrief,
+        questions: adaptiveQuestions
+      },
+      layout: null,
+      layoutModel: null,
+      raw: stageTwoResponse,
+      settings: config,
+      stages: {
+        initial: stageOneResult,
+        refinement: stageTwoResult
+      }
+    };
+  }
+
+  const stageThreeOverride =
+    sanitizeText(config.newBetaStageThreeDeveloperPrompt || '') ||
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.developerPrompt;
+  const { developerText: stageThreeDeveloperPromptText, universalText: stageThreeUniversalPromptText } = composeDeveloperPrompt({
+    basePrompt: baseAnalysisPrompt,
+    summary: adaptiveSummary,
+    addendumLines: adaptivePromptLines,
+    answerLines: adaptiveAnswerInstructions,
+    layoutBrief: adaptiveLayoutBrief,
+    developerOverride: stageThreeOverride
+  });
+
+  const stageThreeUserPrompt = [
+    'Проведи углублённый факт-чекинг усиленного отчёта, исправь неточности и дополни отсутствующие выводы.',
+    '',
+    '<<<REFINED_REPORT>>>',
+    stageTwoReport || '[refined report missing]',
+    '<<<END REFINED_REPORT>>>'
+  ].join('\n');
+
+  const {
+    messages: stageThreeMessages,
+    summary: stageThreeSummary
+  } = buildInputMessages({
+    document,
+    userPrompt: stageThreeUserPrompt,
+    localeHint: localeHint?.trim() || '',
+    developerPromptText: stageThreeDeveloperPromptText,
+    universalPromptText: stageThreeUniversalPromptText,
+    imageParts,
+    fileParts,
+    ragContext: '',
+    attachmentsInfo,
+    adaptiveDeveloperPrompt,
+    adaptivePromptAddendum,
+    adaptivePromptDisplay: adaptivePromptAddendum,
+    adaptiveAnswerText,
+    adaptiveSummary,
+    log
+  });
+
+  if (stageThreeSummary) {
+    log({
+      level: 'info',
+      message: 'Подготовлены входные данные для этапа 3',
+      scope: 'openai',
+      attachments: stageThreeSummary.attachments || [],
+      textLength: stageThreeSummary.textLength,
+      refinedReportIncluded: Boolean(stageTwoReport)
+    });
+  }
+
+  const refinedReportInfo = stageTwoReport
+    ? formatMetadataInfo({
+        included: true,
+        length: stageTwoReport.length,
+        preview: stageTwoReport.slice(0, 200)
+      })
+    : '';
+
+  const stageThreeMetadata = finalizeMetadataEntries(
+    [
+      ...baseMetadataEntries,
+      {
+        key: 'analysisFlow',
+        value: analysisFlow,
+        priority: -3,
+        order: baseMetadataEntries.length
+      },
+      {
+        key: 'analysisStage',
+        value: 'fact-check',
+        priority: -3,
+        order: baseMetadataEntries.length + 1
+      },
+      refinedReportInfo
+        ? {
+            key: 'refinedReportInfo',
+            value: refinedReportInfo,
+            priority: 0,
+            order: baseMetadataEntries.length + 2
+          }
+        : null
+    ].filter(Boolean),
+    { log }
+  );
+
+  const stageThreeModel = resolveModelId(
+    config.newBetaStageThreeModel,
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.model
+  );
+  const stageThreeWebSearchEnabled = Boolean(
+    config.newBetaStageThreeWebSearchEnabled ?? DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.webSearchEnabled
+  );
+  const stageThreeWebSearchDepth = sanitizeSearchDepth(
+    config.newBetaStageThreeWebSearchDepth ?? DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.webSearchDepth,
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.webSearchDepth
+  );
+  const stageThreePayload = {
+    model: stageThreeModel,
+    input: stageThreeMessages,
+    metadata: stageThreeMetadata,
+    text: { format: { type: 'text' }, verbosity: 'high' },
+    reasoning: { effort: 'high' }
+  };
+
+  const stageThreeWebSearchApplied = applyWebSearchSettings({
+    payload: stageThreePayload,
+    enabled: stageThreeWebSearchEnabled,
+    depth: stageThreeWebSearchEnabled ? stageThreeWebSearchDepth : 'low',
+    log,
+    scope: 'analysis-stage-3'
+  });
+
+  if (!stageThreeWebSearchApplied) {
+    log('Web search отключен для этапа 3', 'debug');
+  }
+
+  log({
+    level: 'info',
+    message: `Отправляем запрос (этап 3) в ${stageThreeModel}`,
+    scope: 'analysis',
+    model: stageThreeModel,
+    webSearch: stageThreeWebSearchEnabled,
+    webSearchDepth: stageThreeWebSearchEnabled ? stageThreeWebSearchDepth : 'off',
+    reasoning: 'high',
+    attachments: attachmentsInfo,
+    refinedReportPreview: stageTwoReport ? stageTwoReport.slice(0, 200) : ''
+  });
+
+  const stageThreeResponse = await executeRequest(apiKey, stageThreePayload);
+  const stageThreeReport = collectOutputText(stageThreeResponse);
+  const stageThreeSources = extractWebSources(stageThreeResponse);
+
+  log({
+    level: 'info',
+    message: `Ответ получен (этап 3) от ${stageThreeModel}`,
+    scope: 'analysis',
+    model: stageThreeModel,
+    tokens: stageThreeResponse?.usage?.total_tokens || null,
+    webSources: stageThreeSources.length,
+    outputPreview: stageThreeReport ? stageThreeReport.slice(0, 200) : ''
+  });
+
+  const stageThreeResult = {
+    model: stageThreeModel,
+    usage: stageThreeResponse?.usage || null,
+    reportText: stageThreeReport,
+    raw: stageThreeResponse,
+    sources: stageThreeSources
+  };
+
+  return {
+    reportText: stageThreeReport,
+    model: stageThreeModel,
+    usage: stageThreeResponse?.usage || null,
+    sources: stageThreeSources,
     rag: ragInfo,
     prompt: {
       id: effectivePromptId,
@@ -2430,15 +2650,12 @@ export async function analyzeDocuments({
     },
     layout: null,
     layoutModel: null,
-    raw: stageTwoResponse,
+    raw: stageThreeResponse,
     settings: config,
     stages: {
-      initial: {
-        model: stageOneModel,
-        usage: stageOneResponse?.usage || null,
-        reportText: stageOneReport,
-        raw: stageOneResponse
-      }
+      initial: stageOneResult,
+      refinement: stageTwoResult,
+      factCheck: stageThreeResult
     }
   };
 }
