@@ -266,6 +266,30 @@ const DocumentAnalysisAdminPage = ({ theme, onToggleTheme }) => {
 
   const renderPromptsTab = () => (
     <div className="admin-panel__sections">
+      <div className="admin-card">
+        <div className="admin-card__header">
+          <div className="admin-card__icon admin-card__icon--accent">
+            <Shield size={18} />
+          </div>
+          <div>
+            <h2>Режим анализа</h2>
+            <p>Переключение между новым двухэтапным анализом и предыдущей схемой.</p>
+          </div>
+        </div>
+        <div className="admin-card__body admin-card__body--stack">
+          <div className="admin-field">
+            <span>Variant</span>
+            <select value={draft.analysisFlow || 'new-beta'} onChange={handleInput('analysisFlow')}>
+              <option value="new-beta">New Beta — два запроса (gpt-5-mini → gpt-5)</option>
+              <option value="old">Old — один запрос (только текущая модель)</option>
+            </select>
+            <small>
+              New Beta сначала строит глубокий черновой отчёт, затем усиливает его моделью GPT-5 с web search.
+              При необходимости можно вернуть прошлую реализацию одним переключателем.
+            </small>
+          </div>
+        </div>
+      </div>
       {summaryCards.map((card) => {
         const StageIcon = card.developerToggle ? FileText : FileText;
         const webSearchEnabled = draft[card.webSearchPath];

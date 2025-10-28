@@ -27,6 +27,17 @@ const UNIVERSAL_OUTPUT_FORMAT_BLOCK = (() => {
   return LEGAL_ANALYSIS_PROMPT.slice(index).trim();
 })();
 
+const ANALYSIS_FLOW_MODES = Object.freeze({
+  OLD: 'old',
+  NEW_BETA: 'new-beta'
+});
+
+const NEW_BETA_STAGE_ONE_DEVELOPER_PROMPT =
+  'ты очень опытная юридическая компания, изучи документ, пойми его юрисдикцию и стороны и сделай глубокий анализ документа и напиши мне ТОЛЬКО очень сильный и всеобъемлющий отчёт/анализ сделанный профессиональной юридической компанией с 20 летней практикой в сфере работы с такими документами';
+
+const NEW_BETA_STAGE_TWO_DEVELOPER_PROMPT =
+  'Вы очень опытная Юридическая Компания вам нужно проверить отчёт по документу и сам документ, усилить его(отчет), исправить в нем слабые стороны, добавить то что упущено и нахватает анализе и вернуть полностью исправленный, доработанный, усиленный, Суперпрофессиональный отчёт(анализ) от сильнейшей юридической компании в этой юрисдикции';
+
 const DEFAULT_ANALYSIS_SETTINGS = {
   analysisModel: 'gpt-5-mini',
   preAnalysisModel: 'gpt-5-mini',
@@ -42,7 +53,8 @@ const DEFAULT_ANALYSIS_SETTINGS = {
   layoutReasoningEffort: 'low',
   developerPromptFromTriage: true,
   localeHint: '',
-  prompts: DEFAULT_PROMPT_SETTINGS
+  prompts: DEFAULT_PROMPT_SETTINGS,
+  analysisFlow: ANALYSIS_FLOW_MODES.NEW_BETA
 };
 
 const MAX_TEXT_CHARS = 120_000;
@@ -1867,8 +1879,22 @@ export async function analyzeDocuments({
       ]
     : [];
 
-  const effectivePromptId = adaptiveDeveloperPrompt ? 'adaptive-developer' : 'analysis-base';
-  const effectivePromptName = adaptiveDeveloperPrompt
+  const analysisFlow = config.analysisFlow || ANALYSIS_FLOW_MODES.NEW_BETA;
+  config.analysisFlow = analysisFlow;
+  const isNewBetaFlow = analysisFlow !== ANALYSIS_FLOW_MODES.OLD;
+
+  const developerOverride = isNewBetaFlow
+    ? NEW_BETA_STAGE_ONE_DEVELOPER_PROMPT
+    : adaptiveDeveloperPrompt;
+
+  const effectivePromptId = isNewBetaFlow
+    ? 'new-beta-flow'
+    : adaptiveDeveloperPrompt
+    ? 'adaptive-developer'
+    : 'analysis-base';
+  const effectivePromptName = isNewBetaFlow
+    ? 'New Beta dual-stage analysis'
+    : adaptiveDeveloperPrompt
     ? 'Adaptive developer prompt'
     : 'Base analysis prompt';
 
@@ -1881,7 +1907,7 @@ export async function analyzeDocuments({
     addendumLines: adaptivePromptLines,
     answerLines: adaptiveAnswerInstructions,
     layoutBrief: adaptiveLayoutBrief,
-    developerOverride: adaptiveDeveloperPrompt
+    developerOverride
   });
 
   const { messages, summary } = buildInputMessages({
@@ -2086,57 +2112,280 @@ export async function analyzeDocuments({
     setMetadata('adaptiveDeveloperPromptInfo', info, { priority: 1 });
   }
 
-  const metadata = finalizeMetadataEntries(metadataEntries, { log });
+  const baseMetadataEntries = metadataEntries.map((entry) => ({ ...entry }));
 
-  const payload = {
-    model,
+  if (!isNewBetaFlow) {
+    const metadata = finalizeMetadataEntries(baseMetadataEntries, { log });
+
+    const payload = {
+      model,
+      input: messages,
+      metadata
+    };
+
+    const webSearchApplied = applyWebSearchSettings({
+      payload,
+      enabled: analysisWebSearchEnabled,
+      depth: analysisWebSearchEnabled ? 'medium' : 'low',
+      log,
+      scope: 'analysis'
+    });
+    if (!webSearchApplied) {
+      log('Web search отключен для основного анализа', 'debug');
+    }
+    applyReasoningSettings(payload, analysisReasoningEffort, { log, scope: 'analysis' });
+
+    log({
+      level: 'info',
+      message: `Отправляем запрос в ${model}`,
+      scope: 'analysis',
+      model,
+      webSearch: Boolean(config.analysisWebSearchEnabled),
+      reasoning: analysisReasoningEffort || 'auto',
+      attachments: attachmentsInfo,
+      adaptivePrompt: Boolean(adaptiveDeveloperPrompt || adaptivePromptAddendum)
+    });
+    const responseJson = await executeRequest(apiKey, payload);
+    const reportText = collectOutputText(responseJson);
+    const sources = extractWebSources(responseJson);
+
+    const layoutResult = null;
+
+    log({
+      level: 'info',
+      message: `Ответ от ${model}`,
+      model,
+      tokens: responseJson?.usage?.total_tokens || null,
+      webSources: sources.length,
+      ragUsed: Boolean(ragInfo.used),
+      outputPreview: reportText ? reportText.slice(0, 200) : ''
+    });
+
+    return {
+      reportText,
+      model,
+      usage: responseJson?.usage || null,
+      sources,
+      rag: ragInfo,
+      prompt: {
+        id: effectivePromptId,
+        name: effectivePromptName
+      },
+      adaptive: {
+        applied: Boolean(adaptiveDeveloperPrompt || adaptivePromptAddendum || adaptiveAnswerText),
+        developerPrompt: adaptiveDeveloperPrompt,
+        promptAddendum: adaptivePromptAddendum,
+        promptAddendumLines: adaptivePromptLines,
+        answerInstructions: adaptiveAnswerInstructions,
+        summary: adaptiveSummary,
+        layoutBrief: adaptiveLayoutBrief,
+        questions: adaptiveQuestions
+      },
+      layout: layoutResult?.layout || null,
+      layoutModel: layoutResult?.model || null,
+      raw: responseJson,
+      settings: config
+    };
+  }
+
+  const stageOneMetadata = finalizeMetadataEntries(
+    [
+      ...baseMetadataEntries,
+      {
+        key: 'analysisFlow',
+        value: ANALYSIS_FLOW_MODES.NEW_BETA,
+        priority: -3,
+        order: baseMetadataEntries.length
+      },
+      {
+        key: 'analysisStage',
+        value: 'initial',
+        priority: -3,
+        order: baseMetadataEntries.length + 1
+      }
+    ],
+    { log }
+  );
+
+  const stageOneModel = 'gpt-5-mini';
+  const stageOnePayload = {
+    model: stageOneModel,
     input: messages,
-    metadata
+    metadata: stageOneMetadata,
+    response_format: { type: 'text', text: { format: 'text' } },
+    verbosity: 'high',
+    summary: 'auto',
+    reasoning: { effort: 'high', summary: 'auto' }
   };
 
-  const webSearchApplied = applyWebSearchSettings({
-    payload,
+  const stageOneWebSearchApplied = applyWebSearchSettings({
+    payload: stageOnePayload,
     enabled: analysisWebSearchEnabled,
     depth: analysisWebSearchEnabled ? 'medium' : 'low',
     log,
-    scope: 'analysis'
+    scope: 'analysis-stage-1'
   });
-  if (!webSearchApplied) {
-    log('Web search отключен для основного анализа', 'debug');
+
+  if (!stageOneWebSearchApplied) {
+    log('Web search отключен для этапа 1', 'debug');
   }
-  applyReasoningSettings(payload, analysisReasoningEffort, { log, scope: 'analysis' });
 
   log({
     level: 'info',
-    message: `Отправляем запрос в ${model}`,
+    message: `Отправляем запрос (этап 1) в ${stageOneModel}`,
     scope: 'analysis',
-    model,
-    webSearch: Boolean(config.analysisWebSearchEnabled),
-    reasoning: analysisReasoningEffort || 'auto',
-    attachments: attachmentsInfo,
-    adaptivePrompt: Boolean(adaptiveDeveloperPrompt || adaptivePromptAddendum)
+    model: stageOneModel,
+    webSearch: Boolean(stageOnePayload.tools?.length),
+    reasoning: 'high',
+    attachments: attachmentsInfo
   });
-  const responseJson = await executeRequest(apiKey, payload);
-  const reportText = collectOutputText(responseJson);
-  const sources = extractWebSources(responseJson);
 
-  const layoutResult = null;
+  const stageOneResponse = await executeRequest(apiKey, stageOnePayload);
+  const stageOneReport = collectOutputText(stageOneResponse);
 
   log({
     level: 'info',
-    message: `Ответ от ${model}`,
-    model,
-    tokens: responseJson?.usage?.total_tokens || null,
-    webSources: sources.length,
-    ragUsed: Boolean(ragInfo.used),
-    outputPreview: reportText ? reportText.slice(0, 200) : ''
+    message: `Ответ получен (этап 1) от ${stageOneModel}`,
+    scope: 'analysis',
+    model: stageOneModel,
+    tokens: stageOneResponse?.usage?.total_tokens || null,
+    outputPreview: stageOneReport ? stageOneReport.slice(0, 200) : ''
+  });
+
+  const stageTwoOverride = NEW_BETA_STAGE_TWO_DEVELOPER_PROMPT;
+  const { developerText: stageTwoDeveloperPromptText, universalText: stageTwoUniversalPromptText } = composeDeveloperPrompt({
+    basePrompt: baseAnalysisPrompt,
+    summary: adaptiveSummary,
+    addendumLines: adaptivePromptLines,
+    answerLines: adaptiveAnswerInstructions,
+    layoutBrief: adaptiveLayoutBrief,
+    developerOverride: stageTwoOverride
+  });
+
+  const stageTwoUserPrompt = [
+    'Проверь отчёт из первой итерации, усили его, устрани пробелы и подтверди выводы ссылками на документ и внешние источники.',
+    '',
+    '<<<INITIAL_REPORT>>>',
+    stageOneReport || '[initial report missing]',
+    '<<<END INITIAL_REPORT>>>'
+  ].join('\n');
+
+  const {
+    messages: stageTwoMessages,
+    summary: stageTwoSummary
+  } = buildInputMessages({
+    document,
+    userPrompt: stageTwoUserPrompt,
+    localeHint: localeHint?.trim() || '',
+    developerPromptText: stageTwoDeveloperPromptText,
+    universalPromptText: stageTwoUniversalPromptText,
+    imageParts,
+    fileParts,
+    ragContext: '',
+    attachmentsInfo,
+    adaptiveDeveloperPrompt,
+    adaptivePromptAddendum,
+    adaptivePromptDisplay: adaptivePromptAddendum,
+    adaptiveAnswerText,
+    adaptiveSummary,
+    log
+  });
+
+  if (stageTwoSummary) {
+    log({
+      level: 'info',
+      message: 'Подготовлены входные данные для этапа 2',
+      scope: 'openai',
+      attachments: stageTwoSummary.attachments || [],
+      textLength: stageTwoSummary.textLength,
+      initialReportIncluded: Boolean(stageOneReport)
+    });
+  }
+
+  const initialReportInfo = stageOneReport
+    ? formatMetadataInfo({
+        included: true,
+        length: stageOneReport.length,
+        preview: stageOneReport.slice(0, 200)
+      })
+    : '';
+
+  const stageTwoMetadata = finalizeMetadataEntries(
+    [
+      ...baseMetadataEntries,
+      {
+        key: 'analysisFlow',
+        value: ANALYSIS_FLOW_MODES.NEW_BETA,
+        priority: -3,
+        order: baseMetadataEntries.length
+      },
+      {
+        key: 'analysisStage',
+        value: 'refinement',
+        priority: -3,
+        order: baseMetadataEntries.length + 1
+      },
+      initialReportInfo
+        ? {
+            key: 'initialReportInfo',
+            value: initialReportInfo,
+            priority: 0,
+            order: baseMetadataEntries.length + 2
+          }
+        : null
+    ].filter(Boolean),
+    { log }
+  );
+
+  const stageTwoModel = 'gpt-5.1';
+  const stageTwoPayload = {
+    model: stageTwoModel,
+    input: stageTwoMessages,
+    metadata: stageTwoMetadata,
+    response_format: { type: 'text', text: { format: 'text' } },
+    verbosity: 'high',
+    summary: 'auto',
+    reasoning: { effort: 'high', summary: 'auto' }
+  };
+
+  applyWebSearchSettings({
+    payload: stageTwoPayload,
+    enabled: true,
+    depth: 'high',
+    log,
+    scope: 'analysis-stage-2'
+  });
+
+  log({
+    level: 'info',
+    message: `Отправляем запрос (этап 2) в ${stageTwoModel}`,
+    scope: 'analysis',
+    model: stageTwoModel,
+    webSearch: Boolean(stageTwoPayload.tools?.length),
+    reasoning: 'high',
+    attachments: attachmentsInfo,
+    initialReportPreview: stageOneReport ? stageOneReport.slice(0, 200) : ''
+  });
+
+  const stageTwoResponse = await executeRequest(apiKey, stageTwoPayload);
+  const finalReportText = collectOutputText(stageTwoResponse);
+  const finalSources = extractWebSources(stageTwoResponse);
+
+  log({
+    level: 'info',
+    message: `Ответ получен (этап 2) от ${stageTwoModel}`,
+    scope: 'analysis',
+    model: stageTwoModel,
+    tokens: stageTwoResponse?.usage?.total_tokens || null,
+    webSources: finalSources.length,
+    outputPreview: finalReportText ? finalReportText.slice(0, 200) : ''
   });
 
   return {
-    reportText,
-    model,
-    usage: responseJson?.usage || null,
-    sources,
+    reportText: finalReportText,
+    model: stageTwoModel,
+    usage: stageTwoResponse?.usage || null,
+    sources: finalSources,
     rag: ragInfo,
     prompt: {
       id: effectivePromptId,
@@ -2152,10 +2401,18 @@ export async function analyzeDocuments({
       layoutBrief: adaptiveLayoutBrief,
       questions: adaptiveQuestions
     },
-    layout: layoutResult?.layout || null,
-    layoutModel: layoutResult?.model || null,
-    raw: responseJson,
-    settings: config
+    layout: null,
+    layoutModel: null,
+    raw: stageTwoResponse,
+    settings: config,
+    stages: {
+      initial: {
+        model: stageOneModel,
+        usage: stageOneResponse?.usage || null,
+        reportText: stageOneReport,
+        raw: stageOneResponse
+      }
+    }
   };
 }
 

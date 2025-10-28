@@ -21,6 +21,7 @@ export const getDefaultGptSettings = () => {
       layoutWebSearchEnabled: false,
       layoutReasoningEffort: 'low',
       developerPromptFromTriage: true,
+      analysisFlow: 'new-beta',
       localeHint: '',
       prompts: {
         preAnalysis: LEGAL_PRE_ANALYSIS_PROMPT,
