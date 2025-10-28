@@ -2229,8 +2229,8 @@ export async function analyzeDocuments({
     model: stageOneModel,
     input: messages,
     metadata: stageOneMetadata,
-    text: { format: 'text', verbosity: 'high', summary: 'auto' },
-    reasoning: { effort: 'high', summary: 'auto' }
+    text: { format: 'text', verbosity: 'high' },
+    reasoning: { effort: 'high' }
   };
 
   const stageOneWebSearchApplied = applyWebSearchSettings({
@@ -2370,8 +2370,8 @@ export async function analyzeDocuments({
     model: stageTwoModel,
     input: stageTwoMessages,
     metadata: stageTwoMetadata,
-    text: { format: 'text', verbosity: 'high', summary: 'auto' },
-    reasoning: { effort: 'high', summary: 'auto' }
+    text: { format: 'text', verbosity: 'high' },
+    reasoning: { effort: 'high' }
   };
 
   applyWebSearchSettings({
