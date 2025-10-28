@@ -2229,7 +2229,7 @@ export async function analyzeDocuments({
     model: stageOneModel,
     input: messages,
     metadata: stageOneMetadata,
-    text: { format: 'text', verbosity: 'high' },
+    text: { format: { type: 'text' }, verbosity: 'high' },
     reasoning: { effort: 'high' }
   };
 
@@ -2370,7 +2370,7 @@ export async function analyzeDocuments({
     model: stageTwoModel,
     input: stageTwoMessages,
     metadata: stageTwoMetadata,
-    text: { format: 'text', verbosity: 'high' },
+    text: { format: { type: 'text' }, verbosity: 'high' },
     reasoning: { effort: 'high' }
   };
 
