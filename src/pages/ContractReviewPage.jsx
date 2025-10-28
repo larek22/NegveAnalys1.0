@@ -153,7 +153,7 @@ const Step = ({ index, label, status }) => {
   );
 };
 
-const STAGE_MESSAGES = {
+const BASE_STAGE_MESSAGES = {
   reading: {
     icon: Loader2,
     spinning: true,
@@ -679,6 +679,28 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
 
   const cloudinaryConfig = gptSettings.analysis?.cloudinary || {};
 
+  const isNewBetaFlow = (gptSettings.analysis?.analysisFlow || 'new-beta') !== 'old';
+
+  const stageMessages = useMemo(() => {
+    if (!isNewBetaFlow) {
+      return BASE_STAGE_MESSAGES;
+    }
+    return {
+      ...BASE_STAGE_MESSAGES,
+      analyzing: {
+        ...BASE_STAGE_MESSAGES.analyzing,
+        title: 'Шаг 3 — Двухэтапный анализ',
+        note:
+          'Этап 1/2: gpt-5-mini готовит черновой отчёт. Этап 2/2: gpt-5 с web search проверяет документ и усиливает выводы.'
+      },
+      'summary-ready': {
+        ...BASE_STAGE_MESSAGES['summary-ready'],
+        note:
+          'Проверьте сводку и ответы. Новый режим выполнит два последовательных запроса: gpt-5-mini → gpt-5 с web search.'
+      }
+    };
+  }, [isNewBetaFlow]);
+
   const resetState = useCallback(() => {
     setDocumentRecord(null);
     setTriageResult(null);
@@ -956,7 +978,7 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
   const themeClass = getThemeClass(theme);
   const summaryReady = stage === 'summary-ready';
   const showUploadCard = stage === 'idle';
-  const stageInfo = STAGE_MESSAGES[stage] || null;
+  const stageInfo = stageMessages[stage] || null;
   const StageIcon = stageInfo?.icon || null;
   const targetProgress = useMemo(() => STAGE_PROGRESS[stage] ?? 0, [stage]);
   const roundedProgress = Math.max(0, Math.min(100, Math.round(progressPercent)));
@@ -1067,15 +1089,18 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5 }}
           >
-            Анализ юридических документов в три шага
+            {isNewBetaFlow
+              ? 'Анализ юридических документов в четыре шага (2 запроса к GPT)'
+              : 'Анализ юридических документов в три шага'}
           </motion.h1>
           <motion.p
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6, delay: 0.05 }}
           >
-            Загрузите договор или иной документ, получите уточняющие вопросы, глубокий анализ и оформленный отчёт готовый для
-            печати.
+            {isNewBetaFlow
+              ? 'Загрузите договор или иной документ — gpt-5-mini подготовит детальный черновик, после чего gpt-5 с web search усилит выводы и вернёт финальный отчёт.'
+              : 'Загрузите договор или иной документ, получите уточняющие вопросы, глубокий анализ и оформленный отчёт готовый для печати.'}
           </motion.p>
         </section>
 
@@ -1168,7 +1193,11 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
                 <div className="negve-progress__steps">
                   <Step index={1} label="Подготовка" status={stepStatus(1)} />
                   <Step index={2} label="Предварительный анализ" status={stepStatus(2)} />
-                  <Step index={3} label="Глубокий анализ" status={stepStatus(3)} />
+                  <Step
+                    index={3}
+                    label={isNewBetaFlow ? 'Глубокий анализ ×2' : 'Глубокий анализ'}
+                    status={stepStatus(3)}
+                  />
                   <Step index={4} label="Оформление" status={stepStatus(4)} />
                 </div>
                 {fileInfo && (
@@ -1212,7 +1241,11 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
             <div className="negve-card__header negve-card__header--compact">
               <div>
                 <div className="negve-card__title">Шаг 2. Подтвердите старт глубокого анализа</div>
-                <div className="negve-card__subtitle">GPT учтёт выбранные ответы и комментарии при подготовке отчёта</div>
+                <div className="negve-card__subtitle">
+                  {isNewBetaFlow
+                    ? 'GPT выполнит две итерации: сначала gpt-5-mini подготовит черновик, затем gpt-5 с web search усилит отчёт.'
+                    : 'GPT учтёт выбранные ответы и комментарии при подготовке отчёта'}
+                </div>
               </div>
               <div className="negve-card__header-actions">
                 <button
@@ -1227,7 +1260,8 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
                     </>
                   ) : (
                     <>
-                      <ArrowRight className="negve-icon" /> Начать анализ
+                      <ArrowRight className="negve-icon" />{' '}
+                      {isNewBetaFlow ? 'Запустить двухэтапный анализ' : 'Начать анализ'}
                     </>
                   )}
                 </button>
@@ -1265,6 +1299,41 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
 
         {stage === 'done' && (
           <section className="negve-results">
+            {analysisResult?.reportText && (
+              <div className="negve-card negve-card--result">
+                <div className="negve-card__header">
+                  <div>
+                    <div className="negve-card__title">
+                      {isNewBetaFlow
+                        ? 'Финальный текст (этап 2 — GPT-5 + web search)'
+                        : 'Финальный текст анализа'}
+                    </div>
+                    <div className="negve-card__subtitle">
+                      {isNewBetaFlow
+                        ? 'Это ответ второго запроса. Используйте его напрямую или передайте в модуль оформления.'
+                        : 'Используйте отчёт для подготовки итогового документа.'}
+                    </div>
+                  </div>
+                </div>
+                <div className="negve-card__block" style={{ maxHeight: '420px', overflowY: 'auto' }}>
+                  <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+                    <LinkifiedText text={analysisResult.reportText} />
+                  </div>
+                </div>
+              </div>
+            )}
+            {isNewBetaFlow && analysisResult?.stages?.initial?.reportText && (
+              <div className="negve-card negve-card--result">
+                <details>
+                  <summary>
+                    Черновой отчёт (этап 1 — {analysisResult.stages.initial.model || 'gpt-5-mini'})
+                  </summary>
+                  <div style={{ marginTop: '12px', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+                    <LinkifiedText text={analysisResult.stages.initial.reportText} />
+                  </div>
+                </details>
+              </div>
+            )}
             <div className="negve-card negve-card--result">
               <div className="negve-card__header">
                 <div>

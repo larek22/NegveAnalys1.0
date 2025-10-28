@@ -4,6 +4,12 @@ import {
   LEGAL_LAYOUT_PROMPT,
   LEGAL_PRE_SUMMARY_PROMPT
 } from './prompts.js';
+import {
+  ANALYSIS_FLOW_MODES,
+  DEFAULT_NEW_BETA_STAGE_SETTINGS,
+  NEW_BETA_STAGE_ONE_DEVELOPER_PROMPT,
+  NEW_BETA_STAGE_TWO_DEVELOPER_PROMPT
+} from './analysisFlowDefaults.js';
 
 const OPENAI_ENDPOINT = 'https://api.openai.com/v1/responses';
 const OPENAI_FILES_ENDPOINT = 'https://api.openai.com/v1/files';
@@ -27,17 +33,6 @@ const UNIVERSAL_OUTPUT_FORMAT_BLOCK = (() => {
   return LEGAL_ANALYSIS_PROMPT.slice(index).trim();
 })();
 
-const ANALYSIS_FLOW_MODES = Object.freeze({
-  OLD: 'old',
-  NEW_BETA: 'new-beta'
-});
-
-const NEW_BETA_STAGE_ONE_DEVELOPER_PROMPT =
-  'ты очень опытная юридическая компания, изучи документ, пойми его юрисдикцию и стороны и сделай глубокий анализ документа и напиши мне ТОЛЬКО очень сильный и всеобъемлющий отчёт/анализ сделанный профессиональной юридической компанией с 20 летней практикой в сфере работы с такими документами';
-
-const NEW_BETA_STAGE_TWO_DEVELOPER_PROMPT =
-  'Вы очень опытная Юридическая Компания вам нужно проверить отчёт по документу и сам документ, усилить его(отчет), исправить в нем слабые стороны, добавить то что упущено и нахватает анализе и вернуть полностью исправленный, доработанный, усиленный, Суперпрофессиональный отчёт(анализ) от сильнейшей юридической компании в этой юрисдикции';
-
 const DEFAULT_ANALYSIS_SETTINGS = {
   analysisModel: 'gpt-5-mini',
   preAnalysisModel: 'gpt-5-mini',
@@ -54,7 +49,15 @@ const DEFAULT_ANALYSIS_SETTINGS = {
   developerPromptFromTriage: true,
   localeHint: '',
   prompts: DEFAULT_PROMPT_SETTINGS,
-  analysisFlow: ANALYSIS_FLOW_MODES.NEW_BETA
+  analysisFlow: ANALYSIS_FLOW_MODES.NEW_BETA,
+  newBetaStageOneModel: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.model,
+  newBetaStageOneWebSearchEnabled: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.webSearchEnabled,
+  newBetaStageOneWebSearchDepth: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.webSearchDepth,
+  newBetaStageOneDeveloperPrompt: NEW_BETA_STAGE_ONE_DEVELOPER_PROMPT,
+  newBetaStageTwoModel: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.model,
+  newBetaStageTwoWebSearchEnabled: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.webSearchEnabled,
+  newBetaStageTwoWebSearchDepth: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.webSearchDepth,
+  newBetaStageTwoDeveloperPrompt: NEW_BETA_STAGE_TWO_DEVELOPER_PROMPT
 };
 
 const MAX_TEXT_CHARS = 120_000;
@@ -1883,8 +1886,12 @@ export async function analyzeDocuments({
   config.analysisFlow = analysisFlow;
   const isNewBetaFlow = analysisFlow !== ANALYSIS_FLOW_MODES.OLD;
 
+  const stageOneDeveloperOverride =
+    sanitizeText(config.newBetaStageOneDeveloperPrompt || '') ||
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.developerPrompt;
+
   const developerOverride = isNewBetaFlow
-    ? NEW_BETA_STAGE_ONE_DEVELOPER_PROMPT
+    ? stageOneDeveloperOverride
     : adaptiveDeveloperPrompt;
 
   const effectivePromptId = isNewBetaFlow
@@ -2207,7 +2214,17 @@ export async function analyzeDocuments({
     { log }
   );
 
-  const stageOneModel = 'gpt-5-mini';
+  const stageOneModel = resolveModelId(
+    config.newBetaStageOneModel,
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.model
+  );
+  const stageOneWebSearchEnabled = Boolean(
+    config.newBetaStageOneWebSearchEnabled ?? DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.webSearchEnabled
+  );
+  const stageOneWebSearchDepth = sanitizeSearchDepth(
+    config.newBetaStageOneWebSearchDepth ?? DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.webSearchDepth,
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.webSearchDepth
+  );
   const stageOnePayload = {
     model: stageOneModel,
     input: messages,
@@ -2220,8 +2237,8 @@ export async function analyzeDocuments({
 
   const stageOneWebSearchApplied = applyWebSearchSettings({
     payload: stageOnePayload,
-    enabled: analysisWebSearchEnabled,
-    depth: analysisWebSearchEnabled ? 'medium' : 'low',
+    enabled: stageOneWebSearchEnabled,
+    depth: stageOneWebSearchEnabled ? stageOneWebSearchDepth : 'low',
     log,
     scope: 'analysis-stage-1'
   });
@@ -2235,7 +2252,8 @@ export async function analyzeDocuments({
     message: `Отправляем запрос (этап 1) в ${stageOneModel}`,
     scope: 'analysis',
     model: stageOneModel,
-    webSearch: Boolean(stageOnePayload.tools?.length),
+    webSearch: stageOneWebSearchEnabled,
+    webSearchDepth: stageOneWebSearchEnabled ? stageOneWebSearchDepth : 'off',
     reasoning: 'high',
     attachments: attachmentsInfo
   });
@@ -2252,7 +2270,9 @@ export async function analyzeDocuments({
     outputPreview: stageOneReport ? stageOneReport.slice(0, 200) : ''
   });
 
-  const stageTwoOverride = NEW_BETA_STAGE_TWO_DEVELOPER_PROMPT;
+  const stageTwoOverride =
+    sanitizeText(config.newBetaStageTwoDeveloperPrompt || '') ||
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.developerPrompt;
   const { developerText: stageTwoDeveloperPromptText, universalText: stageTwoUniversalPromptText } = composeDeveloperPrompt({
     basePrompt: baseAnalysisPrompt,
     summary: adaptiveSummary,
@@ -2337,7 +2357,17 @@ export async function analyzeDocuments({
     { log }
   );
 
-  const stageTwoModel = 'gpt-5.1';
+  const stageTwoModel = resolveModelId(
+    config.newBetaStageTwoModel,
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.model
+  );
+  const stageTwoWebSearchEnabled = Boolean(
+    config.newBetaStageTwoWebSearchEnabled ?? DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.webSearchEnabled
+  );
+  const stageTwoWebSearchDepth = sanitizeSearchDepth(
+    config.newBetaStageTwoWebSearchDepth ?? DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.webSearchDepth,
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.webSearchDepth
+  );
   const stageTwoPayload = {
     model: stageTwoModel,
     input: stageTwoMessages,
@@ -2350,8 +2380,8 @@ export async function analyzeDocuments({
 
   applyWebSearchSettings({
     payload: stageTwoPayload,
-    enabled: true,
-    depth: 'high',
+    enabled: stageTwoWebSearchEnabled,
+    depth: stageTwoWebSearchEnabled ? stageTwoWebSearchDepth : 'low',
     log,
     scope: 'analysis-stage-2'
   });
@@ -2361,7 +2391,8 @@ export async function analyzeDocuments({
     message: `Отправляем запрос (этап 2) в ${stageTwoModel}`,
     scope: 'analysis',
     model: stageTwoModel,
-    webSearch: Boolean(stageTwoPayload.tools?.length),
+    webSearch: stageTwoWebSearchEnabled,
+    webSearchDepth: stageTwoWebSearchEnabled ? stageTwoWebSearchDepth : 'off',
     reasoning: 'high',
     attachments: attachmentsInfo,
     initialReportPreview: stageOneReport ? stageOneReport.slice(0, 200) : ''

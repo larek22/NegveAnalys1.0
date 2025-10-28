@@ -13,6 +13,12 @@ const REASONING_OPTIONS = [
   { value: 'high', label: 'Максимальное' }
 ];
 
+const WEB_SEARCH_DEPTH_OPTIONS = [
+  { value: 'low', label: 'Низкая глубина' },
+  { value: 'medium', label: 'Средняя глубина' },
+  { value: 'high', label: 'Максимальная глубина' }
+];
+
 const TABS = [
   {
     id: 'general',
@@ -79,6 +85,8 @@ const DocumentAnalysisAdminPage = ({ theme, onToggleTheme }) => {
   const [dirty, setDirty] = useState(false);
   const [status, setStatus] = useState('saved'); // saved | dirty | saving
   const [logs, setLogs] = useState(() => readLogs());
+
+  const isNewBetaFlow = (draft.analysisFlow || 'new-beta') !== 'old';
 
   useEffect(() => {
     setDraft(gptSettings.analysis);
@@ -290,6 +298,120 @@ const DocumentAnalysisAdminPage = ({ theme, onToggleTheme }) => {
           </div>
         </div>
       </div>
+      {isNewBetaFlow && (
+        <>
+          <div className="admin-card">
+            <div className="admin-card__header">
+              <div className="admin-card__icon admin-card__icon--neutral">
+                <Shield size={18} />
+              </div>
+              <div>
+                <h2>New Beta — Этап 1 (gpt-5-mini)</h2>
+                <p>
+                  Загружаем документ и изображения, готовим черновой отчёт и персональный developer prompt для второго шага.
+                </p>
+              </div>
+            </div>
+            <div className="admin-card__body admin-card__body--grid">
+              <div className="admin-field">
+                <span>Модель</span>
+                <input value={draft.newBetaStageOneModel || ''} onChange={handleInput('newBetaStageOneModel')} />
+              </div>
+              <div className="admin-field admin-field--toggle">
+                <span>Web search</span>
+                <label className="admin-toggle">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(draft.newBetaStageOneWebSearchEnabled)}
+                    onChange={handleToggle('newBetaStageOneWebSearchEnabled')}
+                  />
+                  <span />
+                </label>
+                <small>Включает web search на первом этапе при необходимости.</small>
+              </div>
+              <div className="admin-field">
+                <span>Глубина поиска</span>
+                <select
+                  value={draft.newBetaStageOneWebSearchDepth || 'medium'}
+                  onChange={handleInput('newBetaStageOneWebSearchDepth')}
+                  disabled={!draft.newBetaStageOneWebSearchEnabled}
+                >
+                  {WEB_SEARCH_DEPTH_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="admin-card__body admin-card__body--stack">
+              <div className="admin-field">
+                <span>Developer message</span>
+                <textarea
+                  rows={8}
+                  value={draft.newBetaStageOneDeveloperPrompt || ''}
+                  onChange={handleTextarea('newBetaStageOneDeveloperPrompt')}
+                />
+                <small>Этот текст передаётся модели gpt-5-mini на этапе чернового анализа.</small>
+              </div>
+            </div>
+          </div>
+          <div className="admin-card">
+            <div className="admin-card__header">
+              <div className="admin-card__icon admin-card__icon--neutral">
+                <ScrollText size={18} />
+              </div>
+              <div>
+                <h2>New Beta — Этап 2 (gpt-5 + web search)</h2>
+                <p>Проверяем черновик, усиливаем отчёт и расширяем анализ с помощью веб-поиска.</p>
+              </div>
+            </div>
+            <div className="admin-card__body admin-card__body--grid">
+              <div className="admin-field">
+                <span>Модель</span>
+                <input value={draft.newBetaStageTwoModel || ''} onChange={handleInput('newBetaStageTwoModel')} />
+              </div>
+              <div className="admin-field admin-field--toggle">
+                <span>Web search</span>
+                <label className="admin-toggle">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(draft.newBetaStageTwoWebSearchEnabled)}
+                    onChange={handleToggle('newBetaStageTwoWebSearchEnabled')}
+                  />
+                  <span />
+                </label>
+                <small>Оставьте включённым, чтобы GPT-5 привлекал внешние источники.</small>
+              </div>
+              <div className="admin-field">
+                <span>Глубина поиска</span>
+                <select
+                  value={draft.newBetaStageTwoWebSearchDepth || 'high'}
+                  onChange={handleInput('newBetaStageTwoWebSearchDepth')}
+                  disabled={!draft.newBetaStageTwoWebSearchEnabled}
+                >
+                  {WEB_SEARCH_DEPTH_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="admin-card__body admin-card__body--stack">
+              <div className="admin-field">
+                <span>Developer message</span>
+                <textarea
+                  rows={8}
+                  value={draft.newBetaStageTwoDeveloperPrompt || ''}
+                  onChange={handleTextarea('newBetaStageTwoDeveloperPrompt')}
+                />
+                <small>Используется для финального усиления отчёта моделью gpt-5.</small>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
       {summaryCards.map((card) => {
         const StageIcon = card.developerToggle ? FileText : FileText;
         const webSearchEnabled = draft[card.webSearchPath];
