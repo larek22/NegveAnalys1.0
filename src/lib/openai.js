@@ -4,6 +4,13 @@ import {
   LEGAL_LAYOUT_PROMPT,
   LEGAL_PRE_SUMMARY_PROMPT
 } from './prompts.js';
+import {
+  ANALYSIS_FLOW_MODES,
+  DEFAULT_NEW_BETA_STAGE_SETTINGS,
+  NEW_BETA_STAGE_ONE_DEVELOPER_PROMPT,
+  NEW_BETA_STAGE_THREE_DEVELOPER_PROMPT,
+  NEW_BETA_STAGE_TWO_DEVELOPER_PROMPT
+} from './analysisFlowDefaults.js';
 
 const OPENAI_ENDPOINT = 'https://api.openai.com/v1/responses';
 const OPENAI_FILES_ENDPOINT = 'https://api.openai.com/v1/files';
@@ -42,11 +49,25 @@ const DEFAULT_ANALYSIS_SETTINGS = {
   layoutReasoningEffort: 'low',
   developerPromptFromTriage: true,
   localeHint: '',
-  prompts: DEFAULT_PROMPT_SETTINGS
+  prompts: DEFAULT_PROMPT_SETTINGS,
+  analysisFlow: ANALYSIS_FLOW_MODES.NEW_BETA_TWO,
+  newBetaStageOneModel: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.model,
+  newBetaStageOneWebSearchEnabled: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.webSearchEnabled,
+  newBetaStageOneWebSearchDepth: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.webSearchDepth,
+  newBetaStageOneDeveloperPrompt: NEW_BETA_STAGE_ONE_DEVELOPER_PROMPT,
+  newBetaStageTwoModel: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.model,
+  newBetaStageTwoWebSearchEnabled: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.webSearchEnabled,
+  newBetaStageTwoWebSearchDepth: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.webSearchDepth,
+  newBetaStageTwoDeveloperPrompt: NEW_BETA_STAGE_TWO_DEVELOPER_PROMPT,
+  newBetaStageThreeModel: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.model,
+  newBetaStageThreeWebSearchEnabled: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.webSearchEnabled,
+  newBetaStageThreeWebSearchDepth: DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.webSearchDepth,
+  newBetaStageThreeDeveloperPrompt: NEW_BETA_STAGE_THREE_DEVELOPER_PROMPT
 };
 
 const MAX_TEXT_CHARS = 120_000;
 const MAX_METADATA_VALUE_LENGTH = 500;
+const MAX_METADATA_PROPERTIES = 16;
 const DEFAULT_LAYOUT_MODEL = 'gpt-5-mini';
 const MAX_LAYOUT_INPUT_CHARS = 20_000;
 const MAX_LAYOUT_SECTION_ITEMS = Object.freeze({
@@ -307,6 +328,72 @@ const clampMetadataValue = (value, maxLength = MAX_METADATA_VALUE_LENGTH) => {
     return stringValue;
   }
   return stringValue.slice(0, maxLength);
+};
+
+const normalizeMetadataPreview = (value) => {
+  if (!value) return '';
+  return String(value)
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
+const formatMetadataInfo = ({ included, length, preview, extra = [] }) => {
+  const parts = [];
+  if (typeof included === 'boolean') {
+    parts.push(`included=${included ? 'true' : 'false'}`);
+  }
+  if (Number.isFinite(length)) {
+    parts.push(`len=${length}`);
+  }
+  if (Array.isArray(extra)) {
+    for (const item of extra) {
+      if (item) {
+        parts.push(item);
+      }
+    }
+  }
+  const normalizedPreview = normalizeMetadataPreview(preview);
+  if (normalizedPreview) {
+    parts.push(`preview=${normalizedPreview}`);
+  }
+  return parts.join('; ');
+};
+
+const finalizeMetadataEntries = (entries, { log } = {}) => {
+  if (!Array.isArray(entries) || !entries.length) {
+    return {};
+  }
+  const sorted = entries
+    .slice()
+    .sort((a, b) => {
+      const priorityDiff = (a.priority || 0) - (b.priority || 0);
+      if (priorityDiff !== 0) {
+        return priorityDiff;
+      }
+      return (a.order || 0) - (b.order || 0);
+    });
+  const metadata = {};
+  const dropped = [];
+  for (const entry of sorted) {
+    if (Object.prototype.hasOwnProperty.call(metadata, entry.key)) {
+      continue;
+    }
+    if (Object.keys(metadata).length >= MAX_METADATA_PROPERTIES) {
+      dropped.push(entry.key);
+      continue;
+    }
+    metadata[entry.key] = entry.value;
+  }
+  if (dropped.length && typeof log === 'function') {
+    log({
+      level: 'warn',
+      scope: 'openai',
+      message: 'Metadata trimmed to satisfy OpenAI property limit',
+      droppedMetadataKeys: dropped,
+      keptMetadataKeys: Object.keys(metadata)
+    });
+  }
+  return metadata;
 };
 
 const splitStringIntoChunks = (value, chunkSize = MAX_METADATA_VALUE_LENGTH) => {
@@ -607,7 +694,10 @@ const buildInputMessages = ({
   attachmentsInfo = [],
   adaptivePromptDisplay = '',
   adaptiveAnswerText = '',
-  adaptiveSummary = null
+  adaptiveSummary = null,
+  adaptiveDeveloperPrompt = '',
+  adaptivePromptAddendum = '',
+  log
 }) => {
   const { block, truncated, originalLength } = buildDocumentBlock(document);
   const pageImages = Array.isArray(document?.meta?.pageImages) ? document.meta.pageImages : [];
@@ -644,7 +734,37 @@ const buildInputMessages = ({
     .filter(Boolean)
     .join('\n\n');
 
-  const developerText = developerPromptText || LEGAL_ANALYSIS_PROMPT;
+  // Никаких truncate/clamp! Только мягкая очистка управляющих символов.
+  const sanitizeSoft = (s) =>
+    typeof s === 'string'
+      ? s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+      : '';
+
+  const developerText = [
+    adaptiveDeveloperPrompt && `# Adaptive developer prompt\n${sanitizeSoft(adaptiveDeveloperPrompt)}`,
+    developerPromptText ? sanitizeSoft(developerPromptText) : LEGAL_ANALYSIS_PROMPT,
+    adaptivePromptAddendum && `# Adaptive addendum\n${sanitizeSoft(adaptivePromptAddendum)}`
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  if (typeof log === 'function') {
+    log({
+      level: 'info',
+      scope: 'openai',
+      message: 'Developer message prepared',
+      developerLen: developerText.length
+    });
+  }
+
+  if (typeof log === 'function' && developerText.length > 80000) {
+    log({
+      level: 'warn',
+      scope: 'openai',
+      message: 'Developer prompt is very large; consider splitting policy into short includes.',
+      developerLen: developerText.length
+    });
+  }
   const universalText = sanitizeText(universalPromptText || '');
 
   const universalBlock = universalText
@@ -1767,10 +1887,31 @@ export async function analyzeDocuments({
       ]
     : [];
 
-  const effectivePromptId = adaptiveDeveloperPrompt ? 'adaptive-developer' : 'analysis-base';
-  const effectivePromptName = adaptiveDeveloperPrompt
-    ? 'Adaptive developer prompt'
-    : 'Base analysis prompt';
+  const analysisFlow = config.analysisFlow || ANALYSIS_FLOW_MODES.NEW_BETA_TWO;
+  config.analysisFlow = analysisFlow;
+  const isOldFlow = analysisFlow === ANALYSIS_FLOW_MODES.OLD;
+  const isNewBetaFlow = analysisFlow === ANALYSIS_FLOW_MODES.NEW_BETA;
+  const isNewBetaTwoFlow = analysisFlow === ANALYSIS_FLOW_MODES.NEW_BETA_TWO;
+  const usesMultiStageFlow = !isOldFlow;
+
+  const stageOneDeveloperOverride =
+    sanitizeText(config.newBetaStageOneDeveloperPrompt || '') ||
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.developerPrompt;
+
+  const developerOverride = usesMultiStageFlow ? stageOneDeveloperOverride : adaptiveDeveloperPrompt;
+
+  const effectivePromptId = (() => {
+    if (isNewBetaTwoFlow) return 'new-beta-2-flow';
+    if (isNewBetaFlow) return 'new-beta-flow';
+    if (adaptiveDeveloperPrompt) return 'adaptive-developer';
+    return 'analysis-base';
+  })();
+  const effectivePromptName = (() => {
+    if (isNewBetaTwoFlow) return 'New Beta 2.0 triple-stage analysis';
+    if (isNewBetaFlow) return 'New Beta dual-stage analysis';
+    if (adaptiveDeveloperPrompt) return 'Adaptive developer prompt';
+    return 'Base analysis prompt';
+  })();
 
   const analysisWebSearchEnabled = Boolean(config.analysisWebSearchEnabled);
   const analysisReasoningEffort = config.analysisReasoningEffort || '';
@@ -1781,7 +1922,7 @@ export async function analyzeDocuments({
     addendumLines: adaptivePromptLines,
     answerLines: adaptiveAnswerInstructions,
     layoutBrief: adaptiveLayoutBrief,
-    developerOverride: adaptiveDeveloperPrompt
+    developerOverride
   });
 
   const { messages, summary } = buildInputMessages({
@@ -1794,9 +1935,12 @@ export async function analyzeDocuments({
     fileParts,
     ragContext: '',
     attachmentsInfo,
+    adaptiveDeveloperPrompt,
+    adaptivePromptAddendum,
     adaptivePromptDisplay: adaptivePromptAddendum,
     adaptiveAnswerText,
-    adaptiveSummary
+    adaptiveSummary,
+    log
   });
 
   if (attachmentsInfo.length) {
@@ -1879,8 +2023,12 @@ export async function analyzeDocuments({
     }
   }
 
-  const metadata = {};
-  const setMetadata = (key, value, { allowEmpty = false, maxLength = MAX_METADATA_VALUE_LENGTH } = {}) => {
+  const metadataEntries = [];
+  const setMetadata = (
+    key,
+    value,
+    { allowEmpty = false, maxLength = MAX_METADATA_VALUE_LENGTH, priority = 0 } = {}
+  ) => {
     if (value === null || value === undefined) {
       return;
     }
@@ -1892,7 +2040,7 @@ export async function analyzeDocuments({
     if (clamped === null) {
       return;
     }
-    if (clamped.length < rawString.length) {
+    if (clamped.length < rawString.length && typeof log === 'function') {
       log({
         level: 'warn',
         message: `Metadata поле ${key} обрезано до ${maxLength} символов (лимит OpenAI — 512; превышение вызывает ошибку 400).`,
@@ -1902,121 +2050,589 @@ export async function analyzeDocuments({
         truncatedLength: clamped.length
       });
     }
-    metadata[key] = clamped;
+    metadataEntries.push({ key, value: clamped, priority, order: metadataEntries.length });
   };
 
-  setMetadata('promptId', effectivePromptId ?? '', { allowEmpty: true });
-  setMetadata('promptName', effectivePromptName ?? '', { allowEmpty: true });
-  setMetadata('attachments', JSON.stringify(attachmentsInfo || []), { allowEmpty: true });
-  if (attachmentsInfo.length) {
-    setMetadata('attachments_detail', attachmentsInfo.join('\n'));
+  setMetadata('promptId', effectivePromptId ?? '', { allowEmpty: true, priority: -2 });
+  setMetadata('promptName', effectivePromptName ?? '', { allowEmpty: true, priority: -2 });
+
+  const attachmentsDetail = attachmentsInfo.join('\n');
+  const attachmentsIncluded = attachmentsInfo.length > 0;
+  const attachmentsSummary = formatMetadataInfo({
+    included: attachmentsIncluded,
+    length: attachmentsIncluded ? attachmentsDetail.length : undefined,
+    preview: attachmentsIncluded ? attachmentsDetail.slice(0, 200) : '',
+    extra: attachmentsIncluded ? [`count=${attachmentsInfo.length}`] : []
+  });
+  if (attachmentsSummary) {
+    setMetadata('attachmentsSummary', attachmentsSummary, { allowEmpty: true, priority: -1 });
   }
-  setMetadata('ragUsed', String(Boolean(ragInfo.used && ragInfo.context)));
-  setMetadata('originalFileUploaded', String(Boolean(originalFileUpload?.fileId)));
-  if (originalFileUpload?.fileId) {
-    setMetadata('originalFileId', originalFileUpload.fileId);
-    if (Number.isFinite(Number(originalFileUpload.bytes))) {
-      setMetadata('originalFileSize', String(originalFileUpload.bytes));
-    } else if (Number.isFinite(Number(meta?.originalSize))) {
-      setMetadata('originalFileSize', String(Number(meta.originalSize)));
-    }
+
+  setMetadata('ragUsed', String(Boolean(ragInfo.used && ragInfo.context)), { priority: -1 });
+
+  const originalFileUploaded = Boolean(originalFileUpload?.fileId);
+  const originalFileSize = Number.isFinite(Number(originalFileUpload?.bytes))
+    ? Number(originalFileUpload.bytes)
+    : Number.isFinite(Number(meta?.originalSize))
+    ? Number(meta.originalSize)
+    : null;
+  const originalFileInfo = formatMetadataInfo({
+    included: originalFileUploaded,
+    extra: [
+      originalFileUploaded && originalFileUpload.fileId ? `id=${originalFileUpload.fileId}` : null,
+      Number.isFinite(originalFileSize) ? `sizeBytes=${originalFileSize}` : null
+    ]
+  });
+  if (originalFileInfo) {
+    setMetadata('originalFileInfo', originalFileInfo, { priority: 0 });
   }
   if (adaptiveSummary?.documentType) {
-    setMetadata('adaptiveDocumentType', adaptiveSummary.documentType);
+    setMetadata('adaptiveDocumentType', adaptiveSummary.documentType, { priority: 0 });
   }
   if (adaptivePromptAddendum) {
-    setMetadata('adaptivePromptAddendum', adaptivePromptAddendum);
+    const preview = adaptivePromptAddendum.slice(0, 200);
+    const info = formatMetadataInfo({
+      included: true,
+      length: adaptivePromptAddendum.length,
+      preview,
+      extra: []
+    });
+    setMetadata('adaptivePromptAddendumInfo', info, { priority: 1 });
   }
   if (adaptiveLayoutBrief) {
-    setMetadata('adaptiveLayoutBrief', adaptiveLayoutBrief);
+    const preview = adaptiveLayoutBrief.slice(0, 200);
+    const info = formatMetadataInfo({
+      included: true,
+      length: adaptiveLayoutBrief.length,
+      preview
+    });
+    setMetadata('adaptiveLayoutBriefInfo', info, { priority: 1 });
   }
   if (adaptiveAnswerText) {
-    setMetadata('adaptiveAnswers', adaptiveAnswerText);
-  }
-  const metadataOverflowNotices = [];
-  const setMetadataChunks = (key, value, { allowEmpty = false, chunkSize = MAX_METADATA_VALUE_LENGTH } = {}) => {
-    if (value === null || value === undefined) return;
-    const rawString = String(value);
-    if (!allowEmpty && !rawString.trim()) return;
-
-    const chunks = splitStringIntoChunks(rawString, chunkSize);
-    if (!chunks.length) return;
-
-    chunks.forEach((chunk, index) => {
-      const chunkKey = index === 0 ? key : `${key}_part${index + 1}`;
-      setMetadata(chunkKey, chunk, { allowEmpty: true, maxLength: chunkSize });
+    const preview = adaptiveAnswerText.slice(0, 200);
+    const info = formatMetadataInfo({
+      included: true,
+      length: adaptiveAnswerText.length,
+      preview
     });
-
-    if (chunks.length > 1) {
-      setMetadata(`${key}_length`, rawString.length, { allowEmpty: true });
-      metadataOverflowNotices.push({ key, parts: chunks.length, totalLength: rawString.length });
-    }
-  };
+    setMetadata('adaptiveAnswersInfo', info, { priority: 1 });
+  }
   if (adaptiveDeveloperPrompt) {
-    setMetadataChunks('adaptiveDeveloperPrompt', adaptiveDeveloperPrompt, { allowEmpty: true });
+    const preview = adaptiveDeveloperPrompt.slice(0, 200);
+    const info = formatMetadataInfo({
+      included: true,
+      length: adaptiveDeveloperPrompt.length,
+      preview
+    });
+    setMetadata('adaptiveDeveloperPromptInfo', info, { priority: 1 });
   }
-  if (metadataOverflowNotices.length) {
-    metadataOverflowNotices.forEach(({ key, parts, totalLength }) => {
-      log({
-        level: 'info',
-        message: `Metadata поле ${key} разбито на ${parts} сегмент(а) для передачи полного значения`,
-        scope: 'openai',
-        key,
-        parts,
-        totalLength
-      });
+
+  const baseMetadataEntries = metadataEntries.map((entry) => ({ ...entry }));
+
+  if (isOldFlow) {
+    const metadata = finalizeMetadataEntries(baseMetadataEntries, { log });
+
+    const payload = {
+      model,
+      input: messages,
+      metadata
+    };
+
+    const webSearchApplied = applyWebSearchSettings({
+      payload,
+      enabled: analysisWebSearchEnabled,
+      depth: analysisWebSearchEnabled ? 'medium' : 'low',
+      log,
+      scope: 'analysis'
+    });
+    if (!webSearchApplied) {
+      log('Web search отключен для основного анализа', 'debug');
+    }
+    applyReasoningSettings(payload, analysisReasoningEffort, { log, scope: 'analysis' });
+
+    log({
+      level: 'info',
+      message: `Отправляем запрос в ${model}`,
+      scope: 'analysis',
+      model,
+      webSearch: Boolean(config.analysisWebSearchEnabled),
+      reasoning: analysisReasoningEffort || 'auto',
+      attachments: attachmentsInfo,
+      adaptivePrompt: Boolean(adaptiveDeveloperPrompt || adaptivePromptAddendum)
+    });
+    const responseJson = await executeRequest(apiKey, payload);
+    const reportText = collectOutputText(responseJson);
+    const sources = extractWebSources(responseJson);
+
+    const layoutResult = null;
+
+    log({
+      level: 'info',
+      message: `Ответ от ${model}`,
+      model,
+      tokens: responseJson?.usage?.total_tokens || null,
+      webSources: sources.length,
+      ragUsed: Boolean(ragInfo.used),
+      outputPreview: reportText ? reportText.slice(0, 200) : ''
+    });
+
+    return {
+      reportText,
+      model,
+      usage: responseJson?.usage || null,
+      sources,
+      rag: ragInfo,
+      prompt: {
+        id: effectivePromptId,
+        name: effectivePromptName
+      },
+      adaptive: {
+        applied: Boolean(adaptiveDeveloperPrompt || adaptivePromptAddendum || adaptiveAnswerText),
+        developerPrompt: adaptiveDeveloperPrompt,
+        promptAddendum: adaptivePromptAddendum,
+        promptAddendumLines: adaptivePromptLines,
+        answerInstructions: adaptiveAnswerInstructions,
+        summary: adaptiveSummary,
+        layoutBrief: adaptiveLayoutBrief,
+        questions: adaptiveQuestions
+      },
+      layout: layoutResult?.layout || null,
+      layoutModel: layoutResult?.model || null,
+      raw: responseJson,
+      settings: config
+    };
+  }
+
+  const stageOneMetadata = finalizeMetadataEntries(
+    [
+      ...baseMetadataEntries,
+      {
+        key: 'analysisFlow',
+        value: analysisFlow,
+        priority: -3,
+        order: baseMetadataEntries.length
+      },
+      {
+        key: 'analysisStage',
+        value: 'initial',
+        priority: -3,
+        order: baseMetadataEntries.length + 1
+      }
+    ],
+    { log }
+  );
+
+  const stageOneModel = resolveModelId(
+    config.newBetaStageOneModel,
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.model
+  );
+  const stageOneWebSearchEnabled = Boolean(
+    config.newBetaStageOneWebSearchEnabled ?? DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.webSearchEnabled
+  );
+  const stageOneWebSearchDepth = sanitizeSearchDepth(
+    config.newBetaStageOneWebSearchDepth ?? DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.webSearchDepth,
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageOne.webSearchDepth
+  );
+  const stageOnePayload = {
+    model: stageOneModel,
+    input: messages,
+    metadata: stageOneMetadata,
+    text: { format: { type: 'text' }, verbosity: 'high' },
+    reasoning: { effort: 'high' }
+  };
+
+  const stageOneWebSearchApplied = applyWebSearchSettings({
+    payload: stageOnePayload,
+    enabled: stageOneWebSearchEnabled,
+    depth: stageOneWebSearchEnabled ? stageOneWebSearchDepth : 'low',
+    log,
+    scope: 'analysis-stage-1'
+  });
+
+  if (!stageOneWebSearchApplied) {
+    log('Web search отключен для этапа 1', 'debug');
+  }
+
+  log({
+    level: 'info',
+    message: `Отправляем запрос (этап 1) в ${stageOneModel}`,
+    scope: 'analysis',
+    model: stageOneModel,
+    webSearch: stageOneWebSearchEnabled,
+    webSearchDepth: stageOneWebSearchEnabled ? stageOneWebSearchDepth : 'off',
+    reasoning: 'high',
+    attachments: attachmentsInfo
+  });
+
+  const stageOneResponse = await executeRequest(apiKey, stageOnePayload);
+  const stageOneReport = collectOutputText(stageOneResponse);
+
+  log({
+    level: 'info',
+    message: `Ответ получен (этап 1) от ${stageOneModel}`,
+    scope: 'analysis',
+    model: stageOneModel,
+    tokens: stageOneResponse?.usage?.total_tokens || null,
+    outputPreview: stageOneReport ? stageOneReport.slice(0, 200) : ''
+  });
+
+  const stageOneResult = {
+    model: stageOneModel,
+    usage: stageOneResponse?.usage || null,
+    reportText: stageOneReport,
+    raw: stageOneResponse
+  };
+
+  const stageTwoOverride =
+    sanitizeText(config.newBetaStageTwoDeveloperPrompt || '') ||
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.developerPrompt;
+  const { developerText: stageTwoDeveloperPromptText, universalText: stageTwoUniversalPromptText } = composeDeveloperPrompt({
+    basePrompt: baseAnalysisPrompt,
+    summary: adaptiveSummary,
+    addendumLines: adaptivePromptLines,
+    answerLines: adaptiveAnswerInstructions,
+    layoutBrief: adaptiveLayoutBrief,
+    developerOverride: stageTwoOverride
+  });
+
+  const stageTwoUserPrompt = [
+    'Проверь отчёт из первой итерации, усили его, устрани пробелы и подтверди выводы ссылками на документ и внешние источники.',
+    '',
+    '<<<INITIAL_REPORT>>>',
+    stageOneReport || '[initial report missing]',
+    '<<<END INITIAL_REPORT>>>'
+  ].join('\n');
+
+  const {
+    messages: stageTwoMessages,
+    summary: stageTwoSummary
+  } = buildInputMessages({
+    document,
+    userPrompt: stageTwoUserPrompt,
+    localeHint: localeHint?.trim() || '',
+    developerPromptText: stageTwoDeveloperPromptText,
+    universalPromptText: stageTwoUniversalPromptText,
+    imageParts,
+    fileParts,
+    ragContext: '',
+    attachmentsInfo,
+    adaptiveDeveloperPrompt,
+    adaptivePromptAddendum,
+    adaptivePromptDisplay: adaptivePromptAddendum,
+    adaptiveAnswerText,
+    adaptiveSummary,
+    log
+  });
+
+  if (stageTwoSummary) {
+    log({
+      level: 'info',
+      message: 'Подготовлены входные данные для этапа 2',
+      scope: 'openai',
+      attachments: stageTwoSummary.attachments || [],
+      textLength: stageTwoSummary.textLength,
+      initialReportIncluded: Boolean(stageOneReport)
     });
   }
 
-  const payload = {
-    model,
-    input: messages,
-    metadata
+  const initialReportInfo = stageOneReport
+    ? formatMetadataInfo({
+        included: true,
+        length: stageOneReport.length,
+        preview: stageOneReport.slice(0, 200)
+      })
+    : '';
+
+  const stageTwoMetadata = finalizeMetadataEntries(
+    [
+      ...baseMetadataEntries,
+      {
+        key: 'analysisFlow',
+        value: analysisFlow,
+        priority: -3,
+        order: baseMetadataEntries.length
+      },
+      {
+        key: 'analysisStage',
+        value: 'refinement',
+        priority: -3,
+        order: baseMetadataEntries.length + 1
+      },
+      initialReportInfo
+        ? {
+            key: 'initialReportInfo',
+            value: initialReportInfo,
+            priority: 0,
+            order: baseMetadataEntries.length + 2
+          }
+        : null
+    ].filter(Boolean),
+    { log }
+  );
+
+  const stageTwoModel = resolveModelId(
+    config.newBetaStageTwoModel,
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.model
+  );
+  const requestedStageTwoWebSearch = Boolean(
+    config.newBetaStageTwoWebSearchEnabled ?? DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.webSearchEnabled
+  );
+  const stageTwoWebSearchEnabled = isNewBetaTwoFlow ? false : requestedStageTwoWebSearch;
+  const stageTwoWebSearchDepth = sanitizeSearchDepth(
+    config.newBetaStageTwoWebSearchDepth ?? DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.webSearchDepth,
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageTwo.webSearchDepth
+  );
+  const stageTwoPayload = {
+    model: stageTwoModel,
+    input: stageTwoMessages,
+    metadata: stageTwoMetadata,
+    text: { format: { type: 'text' }, verbosity: 'high' },
+    reasoning: { effort: 'high' }
   };
 
-  const webSearchApplied = applyWebSearchSettings({
-    payload,
-    enabled: analysisWebSearchEnabled,
-    depth: analysisWebSearchEnabled ? 'medium' : 'low',
+  const stageTwoWebSearchApplied = applyWebSearchSettings({
+    payload: stageTwoPayload,
+    enabled: stageTwoWebSearchEnabled,
+    depth: stageTwoWebSearchEnabled ? stageTwoWebSearchDepth : 'low',
     log,
-    scope: 'analysis'
+    scope: 'analysis-stage-2'
   });
-  if (!webSearchApplied) {
-    log('Web search отключен для основного анализа', 'debug');
+
+  if (!stageTwoWebSearchApplied) {
+    log('Web search отключен для этапа 2', 'debug');
   }
-  applyReasoningSettings(payload, analysisReasoningEffort, { log, scope: 'analysis' });
+  if (isNewBetaTwoFlow && requestedStageTwoWebSearch) {
+    log({
+      level: 'info',
+      scope: 'analysis-stage-2',
+      message: 'Web search отключен на этапе 2 для режима New Beta 2.0'
+    });
+  }
 
   log({
     level: 'info',
-    message: `Отправляем запрос в ${model}`,
+    message: `Отправляем запрос (этап 2) в ${stageTwoModel}`,
     scope: 'analysis',
-    model,
-    webSearch: Boolean(config.analysisWebSearchEnabled),
-    reasoning: analysisReasoningEffort || 'auto',
+    model: stageTwoModel,
+    webSearch: stageTwoWebSearchEnabled,
+    webSearchDepth: stageTwoWebSearchEnabled ? stageTwoWebSearchDepth : 'off',
+    webSearchForcedOff: isNewBetaTwoFlow,
+    reasoning: 'high',
     attachments: attachmentsInfo,
-    adaptivePrompt: Boolean(adaptiveDeveloperPrompt || adaptivePromptAddendum)
+    initialReportPreview: stageOneReport ? stageOneReport.slice(0, 200) : ''
   });
-  const responseJson = await executeRequest(apiKey, payload);
-  const reportText = collectOutputText(responseJson);
-  const sources = extractWebSources(responseJson);
 
-  const layoutResult = null;
+  const stageTwoResponse = await executeRequest(apiKey, stageTwoPayload);
+  const stageTwoReport = collectOutputText(stageTwoResponse);
+  const stageTwoSources = extractWebSources(stageTwoResponse);
 
   log({
     level: 'info',
-    message: `Ответ от ${model}`,
-    model,
-    tokens: responseJson?.usage?.total_tokens || null,
-    webSources: sources.length,
-    ragUsed: Boolean(ragInfo.used),
-    outputPreview: reportText ? reportText.slice(0, 200) : ''
+    message: `Ответ получен (этап 2) от ${stageTwoModel}`,
+    scope: 'analysis',
+    model: stageTwoModel,
+    tokens: stageTwoResponse?.usage?.total_tokens || null,
+    webSources: stageTwoSources.length,
+    outputPreview: stageTwoReport ? stageTwoReport.slice(0, 200) : ''
   });
+
+  const stageTwoResult = {
+    model: stageTwoModel,
+    usage: stageTwoResponse?.usage || null,
+    reportText: stageTwoReport,
+    raw: stageTwoResponse,
+    sources: stageTwoSources
+  };
+
+  if (!isNewBetaTwoFlow) {
+    return {
+      reportText: stageTwoReport,
+      model: stageTwoModel,
+      usage: stageTwoResponse?.usage || null,
+      sources: stageTwoSources,
+      rag: ragInfo,
+      prompt: {
+        id: effectivePromptId,
+        name: effectivePromptName
+      },
+      adaptive: {
+        applied: Boolean(adaptiveDeveloperPrompt || adaptivePromptAddendum || adaptiveAnswerText),
+        developerPrompt: adaptiveDeveloperPrompt,
+        promptAddendum: adaptivePromptAddendum,
+        promptAddendumLines: adaptivePromptLines,
+        answerInstructions: adaptiveAnswerInstructions,
+        summary: adaptiveSummary,
+        layoutBrief: adaptiveLayoutBrief,
+        questions: adaptiveQuestions
+      },
+      layout: null,
+      layoutModel: null,
+      raw: stageTwoResponse,
+      settings: config,
+      stages: {
+        initial: stageOneResult,
+        refinement: stageTwoResult
+      }
+    };
+  }
+
+  const stageThreeOverride =
+    sanitizeText(config.newBetaStageThreeDeveloperPrompt || '') ||
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.developerPrompt;
+  const { developerText: stageThreeDeveloperPromptText, universalText: stageThreeUniversalPromptText } = composeDeveloperPrompt({
+    basePrompt: baseAnalysisPrompt,
+    summary: adaptiveSummary,
+    addendumLines: adaptivePromptLines,
+    answerLines: adaptiveAnswerInstructions,
+    layoutBrief: adaptiveLayoutBrief,
+    developerOverride: stageThreeOverride
+  });
+
+  const stageThreeUserPrompt = [
+    'Проведи углублённый факт-чекинг усиленного отчёта, исправь неточности и дополни отсутствующие выводы.',
+    '',
+    '<<<REFINED_REPORT>>>',
+    stageTwoReport || '[refined report missing]',
+    '<<<END REFINED_REPORT>>>'
+  ].join('\n');
+
+  const {
+    messages: stageThreeMessages,
+    summary: stageThreeSummary
+  } = buildInputMessages({
+    document,
+    userPrompt: stageThreeUserPrompt,
+    localeHint: localeHint?.trim() || '',
+    developerPromptText: stageThreeDeveloperPromptText,
+    universalPromptText: stageThreeUniversalPromptText,
+    imageParts,
+    fileParts,
+    ragContext: '',
+    attachmentsInfo,
+    adaptiveDeveloperPrompt,
+    adaptivePromptAddendum,
+    adaptivePromptDisplay: adaptivePromptAddendum,
+    adaptiveAnswerText,
+    adaptiveSummary,
+    log
+  });
+
+  if (stageThreeSummary) {
+    log({
+      level: 'info',
+      message: 'Подготовлены входные данные для этапа 3',
+      scope: 'openai',
+      attachments: stageThreeSummary.attachments || [],
+      textLength: stageThreeSummary.textLength,
+      refinedReportIncluded: Boolean(stageTwoReport)
+    });
+  }
+
+  const refinedReportInfo = stageTwoReport
+    ? formatMetadataInfo({
+        included: true,
+        length: stageTwoReport.length,
+        preview: stageTwoReport.slice(0, 200)
+      })
+    : '';
+
+  const stageThreeMetadata = finalizeMetadataEntries(
+    [
+      ...baseMetadataEntries,
+      {
+        key: 'analysisFlow',
+        value: analysisFlow,
+        priority: -3,
+        order: baseMetadataEntries.length
+      },
+      {
+        key: 'analysisStage',
+        value: 'fact-check',
+        priority: -3,
+        order: baseMetadataEntries.length + 1
+      },
+      refinedReportInfo
+        ? {
+            key: 'refinedReportInfo',
+            value: refinedReportInfo,
+            priority: 0,
+            order: baseMetadataEntries.length + 2
+          }
+        : null
+    ].filter(Boolean),
+    { log }
+  );
+
+  const stageThreeModel = resolveModelId(
+    config.newBetaStageThreeModel,
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.model
+  );
+  const stageThreeWebSearchEnabled = Boolean(
+    config.newBetaStageThreeWebSearchEnabled ?? DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.webSearchEnabled
+  );
+  const stageThreeWebSearchDepth = sanitizeSearchDepth(
+    config.newBetaStageThreeWebSearchDepth ?? DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.webSearchDepth,
+    DEFAULT_NEW_BETA_STAGE_SETTINGS.stageThree.webSearchDepth
+  );
+  const stageThreePayload = {
+    model: stageThreeModel,
+    input: stageThreeMessages,
+    metadata: stageThreeMetadata,
+    text: { format: { type: 'text' }, verbosity: 'high' },
+    reasoning: { effort: 'high' }
+  };
+
+  const stageThreeWebSearchApplied = applyWebSearchSettings({
+    payload: stageThreePayload,
+    enabled: stageThreeWebSearchEnabled,
+    depth: stageThreeWebSearchEnabled ? stageThreeWebSearchDepth : 'low',
+    log,
+    scope: 'analysis-stage-3'
+  });
+
+  if (!stageThreeWebSearchApplied) {
+    log('Web search отключен для этапа 3', 'debug');
+  }
+
+  log({
+    level: 'info',
+    message: `Отправляем запрос (этап 3) в ${stageThreeModel}`,
+    scope: 'analysis',
+    model: stageThreeModel,
+    webSearch: stageThreeWebSearchEnabled,
+    webSearchDepth: stageThreeWebSearchEnabled ? stageThreeWebSearchDepth : 'off',
+    reasoning: 'high',
+    attachments: attachmentsInfo,
+    refinedReportPreview: stageTwoReport ? stageTwoReport.slice(0, 200) : ''
+  });
+
+  const stageThreeResponse = await executeRequest(apiKey, stageThreePayload);
+  const stageThreeReport = collectOutputText(stageThreeResponse);
+  const stageThreeSources = extractWebSources(stageThreeResponse);
+
+  log({
+    level: 'info',
+    message: `Ответ получен (этап 3) от ${stageThreeModel}`,
+    scope: 'analysis',
+    model: stageThreeModel,
+    tokens: stageThreeResponse?.usage?.total_tokens || null,
+    webSources: stageThreeSources.length,
+    outputPreview: stageThreeReport ? stageThreeReport.slice(0, 200) : ''
+  });
+
+  const stageThreeResult = {
+    model: stageThreeModel,
+    usage: stageThreeResponse?.usage || null,
+    reportText: stageThreeReport,
+    raw: stageThreeResponse,
+    sources: stageThreeSources
+  };
 
   return {
-    reportText,
-    model,
-    usage: responseJson?.usage || null,
-    sources,
+    reportText: stageThreeReport,
+    model: stageThreeModel,
+    usage: stageThreeResponse?.usage || null,
+    sources: stageThreeSources,
     rag: ragInfo,
     prompt: {
       id: effectivePromptId,
@@ -2032,10 +2648,15 @@ export async function analyzeDocuments({
       layoutBrief: adaptiveLayoutBrief,
       questions: adaptiveQuestions
     },
-    layout: layoutResult?.layout || null,
-    layoutModel: layoutResult?.model || null,
-    raw: responseJson,
-    settings: config
+    layout: null,
+    layoutModel: null,
+    raw: stageThreeResponse,
+    settings: config,
+    stages: {
+      initial: stageOneResult,
+      refinement: stageTwoResult,
+      factCheck: stageThreeResult
+    }
   };
 }
 
