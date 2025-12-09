@@ -4,7 +4,7 @@ import { ArrowRight, Check, Download, Loader2, Moon, Printer, Sun, UploadCloud }
 import { useApiKey } from '../hooks/useApiKey.js';
 import { useGptSettings } from '../hooks/useGptSettings.js';
 import { getThemeClass } from '../hooks/useTheme.js';
-import { readFileContent } from '../lib/documents.js';
+import { readFileContent, trimSnippet } from '../lib/documents.js';
 import {
   analyzeDocuments,
   formatAnalysisLayout,
@@ -1096,6 +1096,16 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
   const currentFileName = fileInfo?.name || documentRecord?.meta?.originalName || '';
   const displayFileName = formatDisplayFileName(currentFileName);
   const webSources = analysisResult?.sources || [];
+  const documentPreview = useMemo(() => {
+    if (!documentRecord?.text) return '';
+    return trimSnippet(documentRecord.text, 8000);
+  }, [documentRecord]);
+  const documentLanguages = useMemo(() => {
+    const langs = (documentRecord?.meta?.languages || []).filter(Boolean);
+    const unique = Array.from(new Set(langs));
+    return unique.length ? unique.join(', ') : 'не определён';
+  }, [documentRecord]);
+  const documentLength = documentRecord?.text?.length || 0;
 
   const stepStatus = useCallback(
     (step) => {
@@ -1411,6 +1421,44 @@ const ContractReviewPage = ({ theme, onToggleTheme }) => {
               <Loader2 className="negve-progress__spinner" />
             </div>
           </div>
+        )}
+
+        {documentRecord && (
+          <section className="negve-preview">
+            <div className="negve-card negve-card--result">
+              <div className="negve-card__header">
+                <div>
+                  <div className="negve-card__title">Превью загруженного документа</div>
+                  <div className="negve-card__subtitle">
+                    Текст извлечён с учётом кириллицы. Показаны первые {documentPreview.length}{' '}
+                    из {documentLength} символов.
+                  </div>
+                </div>
+                <div className="negve-card__header-actions">
+                  <div className="negve-pill">Определённые языки: {documentLanguages}</div>
+                </div>
+              </div>
+              <div className="negve-card__block">
+                {documentPreview ? (
+                  <div
+                    style={{
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                      maxHeight: '360px',
+                      overflowY: 'auto',
+                      lineHeight: 1.5
+                    }}
+                  >
+                    {documentPreview}
+                  </div>
+                ) : (
+                  <div className="negve-placeholder">
+                    Не удалось извлечь текст документа. Попробуйте другой файл или проверьте формат.
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
         )}
 
         {stage === 'done' && (
